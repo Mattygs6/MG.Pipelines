@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 using AwesomeAssertions;
 
@@ -15,19 +17,19 @@ namespace MG.Pipelines.Configuration.Tests;
 public class ConfigurablePipelineTests
 {
     [Fact]
-    public void Executes_Tasks_In_Order_And_Returns_Ok()
+    public async Task Executes_Tasks_In_Order_And_Returns_Ok()
     {
         var counter = new CounterState();
         var pipeline = new ConfigurablePipeline<CheckoutArgs>(
             new IPipelineTask<CheckoutArgs>[] { new ValidateTask(), new ChargeTask() },
             NullLogger<ConfigurablePipeline<CheckoutArgs>>.Instance);
 
-        pipeline.Execute(new CheckoutArgs(counter)).Should().Be(PipelineResult.Ok);
+        (await pipeline.ExecuteAsync(new CheckoutArgs(counter))).Should().Be(PipelineResult.Ok);
         counter.Calls.Should().Equal("validate", "charge");
     }
 
     [Fact]
-    public void Logs_Unhandled_Task_Exceptions_To_ILogger()
+    public async Task Logs_Unhandled_Task_Exceptions_To_ILogger()
     {
         var logger = new RecordingLogger<ConfigurablePipeline<CheckoutArgs>>();
         var boom = new InvalidOperationException("kapow");
@@ -35,9 +37,10 @@ public class ConfigurablePipelineTests
             new IPipelineTask<CheckoutArgs>[] { new ThrowingTask(boom) },
             logger);
 
-        var act = () => pipeline.Execute(new CheckoutArgs(new CounterState()));
+        var act = async () => await pipeline.ExecuteAsync(new CheckoutArgs(new CounterState()));
 
-        act.Should().Throw<PipelineException>().WithInnerException<InvalidOperationException>();
+        var thrown = await act.Should().ThrowAsync<PipelineException>();
+        thrown.Which.InnerException.Should().BeSameAs(boom);
         logger.Entries.Should().ContainSingle()
             .Which.Should().Match<LogEntry>(e =>
                 e.Level == LogLevel.Error && e.Exception == boom);
@@ -56,7 +59,7 @@ public class ConfigurablePipelineTests
     {
         private readonly Exception exception;
         public ThrowingTask(Exception exception) { this.exception = exception; }
-        public PipelineResult Execute(CheckoutArgs args) => throw exception;
+        public Task<PipelineResult> ExecuteAsync(CheckoutArgs args, CancellationToken cancellationToken = default) => throw exception;
     }
 
     private sealed class RecordingLogger<TCategory> : ILogger<TCategory>

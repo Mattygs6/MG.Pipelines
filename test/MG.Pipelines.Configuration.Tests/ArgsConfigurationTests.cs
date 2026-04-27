@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 using AwesomeAssertions;
 
@@ -124,7 +125,7 @@ public class ArgsConfigurationTests
     }
 
     [Fact]
-    public void End_To_End_CreateArgs_Then_Execute_Pipeline_Uses_Configured_Values()
+    public async Task End_To_End_CreateArgs_Then_Execute_Pipeline_Uses_Configured_Values()
     {
         var section = ConfigBuilders.BuildSection($$"""
             {
@@ -149,7 +150,7 @@ public class ArgsConfigurationTests
         var args = factory.CreateArgs<ConfigurableArgs>("checkout");
         var pipeline = factory.Create<ConfigurableArgs>("checkout");
 
-        pipeline!.Execute(args).Should().Be(PipelineResult.Ok);
+        (await pipeline!.ExecuteAsync(args)).Should().Be(PipelineResult.Ok);
 
         // ConfigArgsTask records the values it observed at execution time.
         args.ObservedCurrency.Should().Be("GBP");

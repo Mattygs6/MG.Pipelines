@@ -68,8 +68,8 @@ public static class ServiceCollectionExtensions
                     services.TryAddTransient(taskType);
                 }
 
-                services.AddKeyedTransient(closedPipelineInterface, attribute.Name, (sp, _) =>
-                    PipelineBuilder.Build(sp, type, attribute.TaskType, attribute.PipelineTasks));
+                services.AddKeyedTransient(closedPipelineInterface, attribute.Name, (sp, key) =>
+                    PipelineBuilder.Build(sp, (string)key!, type, attribute.TaskType, attribute.PipelineTasks));
             }
         }
 

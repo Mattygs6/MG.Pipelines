@@ -15,10 +15,12 @@ namespace MG.Pipelines.Configuration;
 public static class ConfigurationServiceCollectionExtensions
 {
     /// <summary>
-    /// Binds the supplied <paramref name="configurationSection"/> as <c>List&lt;<see cref="PipelineDefinition"/>&gt;</c>
-    /// and registers each entry as a keyed pipeline. If <see cref="PipelineDefinition.Name"/> matches an existing
-    /// attribute-based registration, the configuration entry overrides it (the most recent keyed registration wins
-    /// inside MS DI, and <see cref="Registration.Pipelines"/> is updated via add-or-replace).
+    /// Binds the supplied <paramref name="configurationSection"/> as a JSON array of pipeline
+    /// definitions and registers each entry as a keyed pipeline. Task entries may be either a bare
+    /// type-name string or an object of the form <c>{ "type": "...", "config": { ... } }</c>; the
+    /// <c>config</c> sub-block is bound onto the resolved task instance via
+    /// <see cref="ConfigurationPipelineTaskBinder"/> at pipeline-construction time, and
+    /// <see cref="System.ComponentModel.DataAnnotations"/> validation is enforced.
     /// </summary>
     /// <param name="services">The service collection.</param>
     /// <param name="configurationSection">A configuration section bound as a JSON array of pipeline definitions.</param>
@@ -42,6 +44,7 @@ public static class ConfigurationServiceCollectionExtensions
         services.TryAddTransient<IPipelineFactory, ServiceProviderPipelineFactory>();
 
         var argsBinder = GetOrAddArgsBinder(services);
+        var taskBinder = GetOrAddTaskBinder(services);
 
         var seenNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entrySection in configurationSection.GetChildren())
@@ -63,7 +66,8 @@ public static class ConfigurationServiceCollectionExtensions
                     $"Duplicate pipeline name '{definition.Name}' in configuration.");
             }
 
-            RegisterDefinition(services, definition.Name!, definition);
+            var taskEntries = ParseTaskEntries(entrySection.GetSection("tasks"), definition.Name!);
+            RegisterDefinition(services, definition.Name!, definition, taskEntries, taskBinder);
 
             var argsSection = entrySection.GetSection("args");
             if (argsSection.Exists())
@@ -75,27 +79,47 @@ public static class ConfigurationServiceCollectionExtensions
         return services;
     }
 
-    private static ConfigurationPipelineArgsBinder GetOrAddArgsBinder(IServiceCollection services)
+    private static List<TaskEntry> ParseTaskEntries(IConfigurationSection tasksSection, string pipelineName)
     {
-        // Reuse a single mutable binder across multiple AddPipelinesFromConfiguration calls so that
-        // entries from layered config sources accumulate rather than overwrite.
-        var existing = services.FirstOrDefault(d =>
-            d.ServiceType == typeof(ConfigurationPipelineArgsBinder)
-            && d.ImplementationInstance is ConfigurationPipelineArgsBinder);
-        if (existing?.ImplementationInstance is ConfigurationPipelineArgsBinder current)
+        var entries = new List<TaskEntry>();
+
+        foreach (var taskChild in tasksSection.GetChildren())
         {
-            return current;
+            var contextLabel = $"task[{entries.Count}] of pipeline '{pipelineName}'";
+
+            // Leaf string form: "tasks": [ "MyApp.Foo, MyApp", ... ]
+            if (taskChild.Value is not null)
+            {
+                entries.Add(new TaskEntry(taskChild.Value, configSection: null, contextLabel));
+                continue;
+            }
+
+            // Object form: "tasks": [ { "type": "MyApp.Foo, MyApp", "config": { ... } } ]
+            var typeName = taskChild["type"];
+            if (string.IsNullOrWhiteSpace(typeName))
+            {
+                throw new PipelineConfigurationException(
+                    $"{contextLabel} is an object but is missing the 'type' property.");
+            }
+
+            var configSection = taskChild.GetSection("config");
+            entries.Add(new TaskEntry(
+                typeName!,
+                configSection.Exists() ? configSection : null,
+                contextLabel));
         }
 
-        var binder = new ConfigurationPipelineArgsBinder();
-        services.AddSingleton(binder);
-        services.AddSingleton<IPipelineArgsBinder>(binder);
-        return binder;
+        return entries;
     }
 
-    private static void RegisterDefinition(IServiceCollection services, string name, PipelineDefinition definition)
+    private static void RegisterDefinition(
+        IServiceCollection services,
+        string name,
+        PipelineDefinition definition,
+        List<TaskEntry> taskEntries,
+        ConfigurationPipelineTaskBinder taskBinder)
     {
-        if (definition.Tasks is null || definition.Tasks.Count == 0)
+        if (taskEntries.Count == 0)
         {
             throw new PipelineConfigurationException($"Pipeline '{name}' must declare at least one task.");
         }
@@ -103,11 +127,11 @@ public static class ConfigurationServiceCollectionExtensions
         var (pipelineType, argumentType, isConfigurable) = ResolvePipelineAndArgumentTypes(name, definition);
         var taskInterfaceType = typeof(IPipelineTask<>).MakeGenericType(argumentType);
 
-        var taskTypes = new Type[definition.Tasks.Count];
-        for (var i = 0; i < definition.Tasks.Count; i++)
+        var taskTypes = new Type[taskEntries.Count];
+        for (var i = 0; i < taskEntries.Count; i++)
         {
-            var taskType = TypeNameResolver.Resolve(definition.Tasks[i],
-                $"task[{i}] of pipeline '{name}'");
+            var entry = taskEntries[i];
+            var taskType = TypeNameResolver.Resolve(entry.TypeName, entry.ContextLabel);
 
             if (!Attribute.Reflection.DescendsFromAncestorType(taskType, taskInterfaceType))
             {
@@ -117,6 +141,10 @@ public static class ConfigurationServiceCollectionExtensions
 
             taskTypes[i] = taskType;
             services.TryAddTransient(taskType);
+
+            // Every task in a config-registered pipeline participates in the binder so that
+            // [Required] validation runs even when no `config` block is supplied.
+            taskBinder.RegisterTask(name, i, entry.ConfigSection);
         }
 
         if (isConfigurable)
@@ -129,8 +157,8 @@ public static class ConfigurationServiceCollectionExtensions
 
         var closedPipelineInterface = typeof(IPipeline<>).MakeGenericType(argumentType);
 
-        services.AddKeyedTransient(closedPipelineInterface, name, (sp, _) =>
-            PipelineBuilder.Build(sp, pipelineType, taskInterfaceType, taskTypes));
+        services.AddKeyedTransient(closedPipelineInterface, name, (sp, key) =>
+            PipelineBuilder.Build(sp, (string)key!, pipelineType, taskInterfaceType, taskTypes));
     }
 
     private static (Type pipelineType, Type argumentType, bool isConfigurable) ResolvePipelineAndArgumentTypes(
@@ -180,5 +208,51 @@ public static class ConfigurationServiceCollectionExtensions
         }
 
         return null;
+    }
+
+    private static ConfigurationPipelineArgsBinder GetOrAddArgsBinder(IServiceCollection services)
+    {
+        var existing = services.FirstOrDefault(d =>
+            d.ServiceType == typeof(ConfigurationPipelineArgsBinder)
+            && d.ImplementationInstance is ConfigurationPipelineArgsBinder);
+        if (existing?.ImplementationInstance is ConfigurationPipelineArgsBinder current)
+        {
+            return current;
+        }
+
+        var binder = new ConfigurationPipelineArgsBinder();
+        services.AddSingleton(binder);
+        services.AddSingleton<IPipelineArgsBinder>(binder);
+        return binder;
+    }
+
+    private static ConfigurationPipelineTaskBinder GetOrAddTaskBinder(IServiceCollection services)
+    {
+        var existing = services.FirstOrDefault(d =>
+            d.ServiceType == typeof(ConfigurationPipelineTaskBinder)
+            && d.ImplementationInstance is ConfigurationPipelineTaskBinder);
+        if (existing?.ImplementationInstance is ConfigurationPipelineTaskBinder current)
+        {
+            return current;
+        }
+
+        var binder = new ConfigurationPipelineTaskBinder();
+        services.AddSingleton(binder);
+        services.AddSingleton<IPipelineTaskInstanceBinder>(binder);
+        return binder;
+    }
+
+    private readonly struct TaskEntry
+    {
+        public readonly string TypeName;
+        public readonly IConfiguration? ConfigSection;
+        public readonly string ContextLabel;
+
+        public TaskEntry(string typeName, IConfiguration? configSection, string contextLabel)
+        {
+            TypeName = typeName;
+            ConfigSection = configSection;
+            ContextLabel = contextLabel;
+        }
     }
 }

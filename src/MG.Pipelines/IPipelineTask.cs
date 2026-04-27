@@ -1,3 +1,6 @@
+using System.Threading;
+using System.Threading.Tasks;
+
 namespace MG.Pipelines;
 
 /// <summary>A single step in an <see cref="IPipeline{T}"/>.</summary>
@@ -5,5 +8,7 @@ namespace MG.Pipelines;
 public interface IPipelineTask<in T>
 {
     /// <summary>Executes the task against the supplied argument.</summary>
-    PipelineResult Execute(T args);
+    /// <param name="args">The pipeline argument.</param>
+    /// <param name="cancellationToken">Propagated cancellation. Implementations should observe it.</param>
+    Task<PipelineResult> ExecuteAsync(T args, CancellationToken cancellationToken = default);
 }

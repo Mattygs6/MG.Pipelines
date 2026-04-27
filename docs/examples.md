@@ -5,6 +5,8 @@ Every example below uses this small domain — a checkout flow with three tasks:
 ```csharp
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using MG.Pipelines;
 
 public class CheckoutArgs
@@ -16,37 +18,45 @@ public class CheckoutArgs
 
 public class ValidateCart : IPipelineTask<CheckoutArgs>
 {
-    public PipelineResult Execute(CheckoutArgs args)
+    public Task<PipelineResult> ExecuteAsync(CheckoutArgs args, CancellationToken ct = default)
     {
         args.Trace.Add("validate");
-        return args.Total > 0 ? PipelineResult.Ok : PipelineResult.Fail;
+        return Task.FromResult(args.Total > 0 ? PipelineResult.Ok : PipelineResult.Fail);
     }
 }
 
 public class ChargeCard : IUndoablePipelineTask<CheckoutArgs>
 {
-    public PipelineResult Execute(CheckoutArgs args)
+    private readonly IPaymentGateway gateway;
+    public ChargeCard(IPaymentGateway gateway) { this.gateway = gateway; }
+
+    public async Task<PipelineResult> ExecuteAsync(CheckoutArgs args, CancellationToken ct = default)
     {
         args.Trace.Add("charge");
+        await gateway.ChargeAsync(args.CustomerId, args.Total, ct);
         return PipelineResult.Ok;
     }
 
-    public PipelineResult Undo(CheckoutArgs args)
+    public async Task<PipelineResult> UndoAsync(CheckoutArgs args, CancellationToken ct = default)
     {
         args.Trace.Add("refund");      // rolled back when a later task fails
+        await gateway.RefundAsync(args.CustomerId, args.Total, ct);
         return PipelineResult.Ok;
     }
 }
 
 public class SendReceipt : IPipelineTask<CheckoutArgs>
 {
-    public PipelineResult Execute(CheckoutArgs args)
+    public Task<PipelineResult> ExecuteAsync(CheckoutArgs args, CancellationToken ct = default)
     {
         args.Trace.Add("receipt");
-        return PipelineResult.Ok;
+        return Task.FromResult(PipelineResult.Ok);
     }
 }
 ```
+
+The `Async` suffix and `CancellationToken` are required by the interface; pure
+CPU-only tasks can use `Task.FromResult(...)` to satisfy the signature.
 
 ---
 
@@ -66,11 +76,13 @@ public class CheckoutPipeline : Pipeline<CheckoutArgs>
 var pipeline = new CheckoutPipeline(new IPipelineTask<CheckoutArgs>[]
 {
     new ValidateCart(),
-    new ChargeCard(),
+    new ChargeCard(gateway),
     new SendReceipt(),
 });
 
-var result = pipeline.Execute(new CheckoutArgs { CustomerId = "abc", Total = 42m });
+var result = await pipeline.ExecuteAsync(
+    new CheckoutArgs { CustomerId = "abc", Total = 42m },
+    cancellationToken);
 // result == PipelineResult.Ok
 ```
 
@@ -96,7 +108,7 @@ public class CheckoutPipeline : Pipeline<CheckoutArgs>
 Registration.RegisterPipelines();
 
 var pipeline = PipelineFactory.Instance.Create<CheckoutArgs>("checkout");
-pipeline!.Execute(new CheckoutArgs { CustomerId = "abc", Total = 42m });
+await pipeline!.ExecuteAsync(new CheckoutArgs { CustomerId = "abc", Total = 42m });
 ```
 
 A single class can declare **multiple** `[Pipeline]` attributes — useful when
@@ -129,7 +141,9 @@ using var provider = services.BuildServiceProvider();
 
 var factory = provider.GetRequiredService<IPipelineFactory>();
 var pipeline = factory.Create<CheckoutArgs>("checkout");
-pipeline!.Execute(new CheckoutArgs { CustomerId = "abc", Total = 42m });
+await pipeline!.ExecuteAsync(
+    new CheckoutArgs { CustomerId = "abc", Total = 42m },
+    cancellationToken);
 ```
 
 Tasks can take any DI-resolvable constructor arguments:
@@ -145,7 +159,7 @@ public class ChargeCard : IUndoablePipelineTask<CheckoutArgs>
         this.gateway = gateway;
         this.logger = logger;
     }
-    // ...
+    // ... ExecuteAsync / UndoAsync as above
 }
 ```
 
@@ -281,7 +295,7 @@ var args = factory.CreateArgs<CheckoutArgs>("checkout");
 args.CustomerId = httpContext.User.Identity!.Name;     // request-specific overrides
 args.Total = cart.Total;
 
-factory.Create<CheckoutArgs>("checkout")!.Execute(args);
+await factory.Create<CheckoutArgs>("checkout")!.ExecuteAsync(args, cancellationToken);
 ```
 
 **Caller overrides win** — properties you set after `CreateArgs` are not
@@ -325,7 +339,119 @@ run in registration order, mutating the same instance):
 services.AddSingleton<IPipelineArgsBinder, MyEnvironmentOverlayBinder>();
 ```
 
-## 6. Attribute + Configuration (override pattern)
+## 6. Per-task configuration
+
+Each entry in a `tasks` array can be either a bare type-name string (the
+default) or an object of the form `{ "type": "...", "config": { ... } }`. The
+`config` block is bound onto the freshly resolved task instance via the
+standard `Microsoft.Extensions.Configuration.Binder`, before the task is added
+to the pipeline.
+
+```jsonc
+{
+  "Pipelines": [
+    {
+      "name": "checkout",
+      "argumentType": "MyApp.CheckoutArgs, MyApp",
+      "tasks": [
+        "MyApp.ValidateCart, MyApp",
+        {
+          "type": "MyApp.ChargeCard, MyApp",
+          "config": {
+            "ApiKey": "live-sk-...",
+            "TimeoutSeconds": 30,
+            "MaxRetries": 3
+          }
+        },
+        {
+          "type": "MyApp.SendReceipt, MyApp",
+          "config": { "TemplateId": "tpl_default" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+```csharp
+public class ChargeCard : IUndoablePipelineTask<CheckoutArgs>
+{
+    [Required]
+    public string ApiKey { get; set; } = null!;     // missing config -> throws
+
+    public int TimeoutSeconds { get; set; } = 5;     // optional, has a default
+    public int MaxRetries { get; set; } = 1;
+    // ... ExecuteAsync / UndoAsync
+}
+```
+
+**Validation (required properties)** — after binding, the task instance is
+validated. Two mechanisms are recognised:
+
+1. **`[Required]` (and other `System.ComponentModel.DataAnnotations`)** —
+   classic attribute-based validation via `Validator.TryValidateObject`. Use this
+   for reference types (`string`, custom classes, `int?`, etc.). Note that
+   `[Required]` on a non-nullable value type (`[Required] int Foo`) is a no-op
+   in DataAnnotations — `int` can never be null.
+2. **`required` keyword (C# 11)** — `public required int MaxRetries { get; set; }`.
+   The keyword is compile-time only and is bypassed by reflection-based
+   instantiation, so the binder enforces it at runtime by checking that the
+   supplied config section actually carried a key matching the property name.
+   This works correctly for value types: `required int MaxRetries` is satisfied
+   by `"MaxRetries": 0` but rejected if the key is absent.
+
+Either mechanism throws `PipelineConfigurationException` listing the offending
+properties — at `factory.Create<T>(name)` time, so misconfiguration is caught
+before the pipeline runs:
+
+```text
+Task 'MyApp.ChargeCard' at index 1 of pipeline 'checkout' failed configuration
+validation: The ApiKey field is required.; The MaxRetries field is required
+(marked with the C# 'required' keyword).
+```
+
+Validation runs for every task in a config-registered pipeline, even tasks
+declared in the bare-string form. Tasks registered exclusively through
+`[Pipeline]` / `AddPipelines` (no Configuration overlay) are not validated.
+
+> **Caveat for `required`** — the binder treats "required" as "the config key
+> must be present." If you combine `required` with a property initializer
+> (`public required int MaxRetries { get; set; } = 5;`) and a
+> `[SetsRequiredMembers]` constructor, the value is set at construction but the
+> binder will still demand the config key. If you want a default-with-fallback
+> semantic, drop the `required` keyword and validate manually, or use
+> `[Required]` on a nullable type.
+
+**Per-instance, not per-type** — config is keyed by `(pipeline name, task
+index)`, so the same task type can appear in multiple pipelines with different
+config, and even multiple times within one pipeline:
+
+```jsonc
+{
+  "name": "fan-out",
+  "argumentType": "MyApp.RequestArgs, MyApp",
+  "tasks": [
+    { "type": "MyApp.HttpCall, MyApp",
+      "config": { "Endpoint": "https://primary.api/" } },
+    { "type": "MyApp.HttpCall, MyApp",
+      "config": { "Endpoint": "https://fallback.api/" } }
+  ]
+}
+```
+
+**Lifetime** — tasks targeted by per-instance config must be transient (the
+default registration lifetime). Pre-registering a task as `AddSingleton` would
+let successive `factory.Create<T>(name)` calls overwrite each other's config on
+the shared instance.
+
+**Custom binders** — the contract is `IPipelineTaskInstanceBinder` (in
+`MG.Pipelines.DependencyInjection`). The Configuration package registers an
+implementation; you can register additional binders for other sources (e.g.
+secrets), and they all run in registration order against each task instance.
+
+---
+
+## 7. Attribute + Configuration (override pattern)
 
 Register pipelines from attributes for the default behaviour, then layer
 configuration on top to override task lists at deploy time.
@@ -370,7 +496,7 @@ check toggle via config:
 
 ---
 
-## 7. Custom name resolution
+## 8. Custom name resolution
 
 Implement `IPipelineNameResolver` to expand a logical name into multiple
 candidates (most-specific first). The factory tries each in order and returns
@@ -414,7 +540,7 @@ resolves `AcmeCheckoutPipeline`; everyone else falls through to
 
 ---
 
-## 8. Rollback (undoable tasks)
+## 9. Rollback (undoable tasks)
 
 Tasks that implement `IUndoablePipelineTask<T>` are rolled back in reverse
 order when a later task aborts, fails, or throws. Non-undoable tasks in the
@@ -431,24 +557,67 @@ public class CheckoutPipeline : Pipeline<CheckoutArgs> { /* ... */ }
 
 If `SendReceipt` throws:
 1. `Pipeline<T>.Log(ex, message)` is invoked with the exception.
-2. `SendReceipt.Undo` is **not** called (it isn't undoable).
-3. `ReserveInventory.Undo`, then `ChargeCard.Undo` run in reverse.
+2. `SendReceipt.UndoAsync` is **not** called (it isn't undoable).
+3. `ReserveInventory.UndoAsync`, then `ChargeCard.UndoAsync` run in reverse.
 4. The original exception is rethrown wrapped in a `PipelineException`.
 
-Override `Pipeline<T>.Undo` if you need a custom rollback strategy (e.g. abort
-on the first undo failure rather than continuing).
+Override `Pipeline<T>.UndoAsync` if you need a custom rollback strategy (e.g.
+abort on the first undo failure rather than continuing).
 
 ---
 
-## 9. Result semantics
+## 10. Cancellation
+
+`ExecuteAsync` accepts a `CancellationToken`. When cancelled, the pipeline
+stops at the next task boundary, runs rollback over the executed tasks, and
+rethrows the `OperationCanceledException` **unwrapped**:
 
 ```csharp
-public PipelineResult Execute(CheckoutArgs args)
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+try
 {
-    if (args.Total <= 0) return PipelineResult.Fail;          // stop, rollback, return Fail
-    if (args.Total > 10_000) return PipelineResult.Abort;     // stop, rollback, return Abort
-    if (CartIsExpiringSoon(args)) return PipelineResult.Warn; // continue, but escalate result
-    return PipelineResult.Ok;
+    await factory.Create<CheckoutArgs>("checkout")!.ExecuteAsync(args, cts.Token);
+}
+catch (OperationCanceledException) when (cts.Token.IsCancellationRequested)
+{
+    // Cancellation is control flow, not a pipeline error — undoable tasks have already run.
+    return Results.StatusCode(499);
+}
+```
+
+The same token is passed to `UndoAsync`, so by default cleanup work also
+respects cancellation. If you need cleanup to run unconditionally, override
+`UndoAsync` on the pipeline subclass and pass `CancellationToken.None`:
+
+```csharp
+public class CheckoutPipeline : Pipeline<CheckoutArgs>
+{
+    // ...
+    protected override Task UndoAsync(
+        IList<IPipelineTask<CheckoutArgs>> executedTasks,
+        CheckoutArgs args,
+        CancellationToken cancellationToken) =>
+        base.UndoAsync(executedTasks, args, CancellationToken.None);
+}
+```
+
+Inside a task, observe the token at any await boundary or by calling
+`cancellationToken.ThrowIfCancellationRequested()`. The pipeline catches
+`OperationCanceledException` from `ExecuteAsync`, treats it as a cancel signal,
+and rolls back.
+
+---
+
+## 11. Result semantics
+
+```csharp
+public Task<PipelineResult> ExecuteAsync(CheckoutArgs args, CancellationToken ct = default)
+{
+    if (args.Total <= 0)               return Task.FromResult(PipelineResult.Fail);
+    if (args.Total > 10_000)            return Task.FromResult(PipelineResult.Abort);
+    if (CartIsExpiringSoon(args))       return Task.FromResult(PipelineResult.Warn);
+    return Task.FromResult(PipelineResult.Ok);
 }
 ```
 
@@ -458,7 +627,7 @@ rollback.
 
 ---
 
-## 10. Putting it together (ASP.NET Core)
+## 12. Putting it together (ASP.NET Core)
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -470,7 +639,10 @@ builder.Services.AddPipelinesFromConfiguration(builder.Configuration.GetSection(
 
 var app = builder.Build();
 
-app.MapPost("/checkout", (CheckoutRequest request, IPipelineFactory factory) =>
+app.MapPost("/checkout", async (
+    CheckoutRequest request,
+    IPipelineFactory factory,
+    CancellationToken cancellationToken) =>
 {
     // Configured defaults applied; request data layered on top.
     var args = factory.CreateArgs<CheckoutArgs>("checkout");
@@ -480,14 +652,22 @@ app.MapPost("/checkout", (CheckoutRequest request, IPipelineFactory factory) =>
     var pipeline = factory.Create<CheckoutArgs>("checkout")
         ?? throw new InvalidOperationException("checkout pipeline is not registered");
 
-    var result = pipeline.Execute(args);
-    return result switch
+    try
     {
-        PipelineResult.Ok   => Results.Ok(args),
-        PipelineResult.Warn => Results.Ok(new { args, warning = "completed with warnings" }),
-        PipelineResult.Abort => Results.Conflict("checkout aborted"),
-        _ => Results.Problem("checkout failed"),
-    };
+        var result = await pipeline.ExecuteAsync(args, cancellationToken);
+        return result switch
+        {
+            PipelineResult.Ok    => Results.Ok(args),
+            PipelineResult.Warn  => Results.Ok(new { args, warning = "completed with warnings" }),
+            PipelineResult.Abort => Results.Conflict("checkout aborted"),
+            _                    => Results.Problem("checkout failed"),
+        };
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+    {
+        // The HTTP request was cancelled; rollback already ran.
+        return Results.StatusCode(499);
+    }
 });
 
 app.Run();

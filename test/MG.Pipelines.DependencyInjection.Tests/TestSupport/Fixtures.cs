@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 using MG.Pipelines.Attribute;
 
@@ -29,11 +31,11 @@ public sealed class Increment : IPipelineTask<Args>
 
     public Increment(Counter counter) { this.counter = counter; }
 
-    public PipelineResult Execute(Args args)
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
     {
         counter.Value++;
         args.Log.Add($"inc={counter.Value}");
-        return PipelineResult.Ok;
+        return Task.FromResult(PipelineResult.Ok);
     }
 }
 
@@ -43,11 +45,11 @@ public sealed class Double : IPipelineTask<Args>
 
     public Double(Counter counter) { this.counter = counter; }
 
-    public PipelineResult Execute(Args args)
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
     {
         counter.Value *= 2;
         args.Log.Add($"dbl={counter.Value}");
-        return PipelineResult.Ok;
+        return Task.FromResult(PipelineResult.Ok);
     }
 }
 

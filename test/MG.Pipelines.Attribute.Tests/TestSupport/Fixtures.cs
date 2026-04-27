@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 using Xunit;
 
@@ -19,22 +21,35 @@ public sealed class ArgsB { public List<string> Log { get; } = new(); }
 
 public sealed class TaskA1 : IPipelineTask<ArgsA>
 {
-    public PipelineResult Execute(ArgsA args) { args.Log.Add("A1"); return PipelineResult.Ok; }
+    public Task<PipelineResult> ExecuteAsync(ArgsA args, CancellationToken cancellationToken = default)
+    {
+        args.Log.Add("A1");
+        return Task.FromResult(PipelineResult.Ok);
+    }
 }
 
 public sealed class TaskA2 : IPipelineTask<ArgsA>
 {
-    public PipelineResult Execute(ArgsA args) { args.Log.Add("A2"); return PipelineResult.Ok; }
+    public Task<PipelineResult> ExecuteAsync(ArgsA args, CancellationToken cancellationToken = default)
+    {
+        args.Log.Add("A2");
+        return Task.FromResult(PipelineResult.Ok);
+    }
 }
 
 public sealed class TaskB1 : IPipelineTask<ArgsB>
 {
-    public PipelineResult Execute(ArgsB args) { args.Log.Add("B1"); return PipelineResult.Ok; }
+    public Task<PipelineResult> ExecuteAsync(ArgsB args, CancellationToken cancellationToken = default)
+    {
+        args.Log.Add("B1");
+        return Task.FromResult(PipelineResult.Ok);
+    }
 }
 
 public sealed class MismatchTask : IPipelineTask<ArgsB>
 {
-    public PipelineResult Execute(ArgsB args) => PipelineResult.Ok;
+    public Task<PipelineResult> ExecuteAsync(ArgsB args, CancellationToken cancellationToken = default) =>
+        Task.FromResult(PipelineResult.Ok);
 }
 
 [Pipeline("pipeline-a", typeof(ArgsA), typeof(TaskA1), typeof(TaskA2))]

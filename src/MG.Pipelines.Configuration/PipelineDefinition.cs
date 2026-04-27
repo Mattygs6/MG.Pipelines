@@ -1,15 +1,19 @@
-using System.Collections.Generic;
-
 namespace MG.Pipelines.Configuration;
 
 /// <summary>
-/// A single pipeline definition bound from configuration. Maps to a JSON object like:
+/// A single pipeline definition bound from configuration. The <c>tasks</c> array entries are parsed
+/// separately (not bound onto this POCO) because each entry may be either a string (just the type
+/// name) or an object with a <c>config</c> sub-block bound onto the task instance:
 /// <code>
 /// {
 ///   "name": "checkout:vip",
 ///   "argumentType": "MyApp.CheckoutArgs, MyApp",
 ///   "pipelineType": "MyApp.Pipelines.VipCheckout, MyApp",
-///   "tasks": [ "MyApp.Tasks.Validate, MyApp", "MyApp.Tasks.Charge, MyApp" ]
+///   "tasks": [
+///     "MyApp.Tasks.Validate, MyApp",
+///     { "type": "MyApp.Tasks.Charge, MyApp", "config": { "MaxRetries": 3 } }
+///   ],
+///   "args": { "Currency": "USD" }
 /// }
 /// </code>
 /// </summary>
@@ -33,7 +37,4 @@ public sealed class PipelineDefinition
     /// when omitted, a built-in <see cref="ConfigurablePipeline{T}"/> is used.
     /// </summary>
     public string? PipelineType { get; set; }
-
-    /// <summary>The ordered list of task type names to instantiate for the pipeline. Required and non-empty.</summary>
-    public List<string> Tasks { get; set; } = new();
 }

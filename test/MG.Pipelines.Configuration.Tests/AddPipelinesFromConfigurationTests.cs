@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 
 using AwesomeAssertions;
 
@@ -30,7 +31,7 @@ public class AddPipelinesFromConfigurationTests
     }
 
     [Fact]
-    public void Registers_ConfigurablePipeline_When_PipelineType_Is_Omitted()
+    public async Task Registers_ConfigurablePipeline_When_PipelineType_Is_Omitted()
     {
         var section = ConfigBuilders.BuildSection($$"""
             {
@@ -53,7 +54,7 @@ public class AddPipelinesFromConfigurationTests
         pipeline.Should().BeOfType<ConfigurablePipeline<CheckoutArgs>>();
         var counter = provider.GetRequiredService<CounterState>();
         var args = new CheckoutArgs(counter);
-        pipeline!.Execute(args).Should().Be(PipelineResult.Ok);
+        (await pipeline!.ExecuteAsync(args)).Should().Be(PipelineResult.Ok);
         counter.Calls.Should().Equal("validate", "charge");
     }
 
@@ -80,7 +81,7 @@ public class AddPipelinesFromConfigurationTests
     }
 
     [Fact]
-    public void Configuration_Overrides_Existing_Attribute_Pipeline_Task_Order()
+    public async Task Configuration_Overrides_Existing_Attribute_Pipeline_Task_Order()
     {
         var section = ConfigBuilders.BuildSection($$"""
             {
@@ -102,11 +103,11 @@ public class AddPipelinesFromConfigurationTests
         var counter = provider.GetRequiredService<CounterState>();
         var args = new CheckoutArgs(counter);
 
-        provider.GetRequiredService<IPipelineFactory>()
+        var result = await provider.GetRequiredService<IPipelineFactory>()
             .Create<CheckoutArgs>("attribute-checkout")!
-            .Execute(args)
-            .Should().Be(PipelineResult.Ok);
+            .ExecuteAsync(args);
 
+        result.Should().Be(PipelineResult.Ok);
         counter.Calls.Should().Equal("fraud", "validate", "charge", "receipt");
     }
 

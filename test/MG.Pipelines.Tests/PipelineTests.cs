@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 using AwesomeAssertions;
 
@@ -12,7 +14,7 @@ namespace MG.Pipelines.Tests;
 public class PipelineTests
 {
     [Fact]
-    public void All_Ok_Runs_Every_Task_In_Order_And_Returns_Ok()
+    public async Task All_Ok_Runs_Every_Task_In_Order_And_Returns_Ok()
     {
         var args = new Args();
         var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
@@ -22,14 +24,14 @@ public class PipelineTests
             new OkTask("c"),
         });
 
-        var result = pipeline.Execute(args);
+        var result = await pipeline.ExecuteAsync(args);
 
         result.Should().Be(PipelineResult.Ok);
         args.Log.Should().Equal("a:exec", "b:exec", "c:exec");
     }
 
     [Fact]
-    public void Warn_Is_Recorded_But_Does_Not_Short_Circuit()
+    public async Task Warn_Is_Recorded_But_Does_Not_Short_Circuit()
     {
         var args = new Args();
         var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
@@ -39,14 +41,14 @@ public class PipelineTests
             new OkTask("c"),
         });
 
-        var result = pipeline.Execute(args);
+        var result = await pipeline.ExecuteAsync(args);
 
         result.Should().Be(PipelineResult.Warn);
         args.Log.Should().Equal("a:exec", "b:exec", "c:exec");
     }
 
     [Fact]
-    public void Abort_Short_Circuits_And_Undoes_Executed_Tasks_In_Reverse()
+    public async Task Abort_Short_Circuits_And_Undoes_Executed_Tasks_In_Reverse()
     {
         var args = new Args();
         var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
@@ -57,7 +59,7 @@ public class PipelineTests
             new OkTask("d"),                                // never runs
         });
 
-        var result = pipeline.Execute(args);
+        var result = await pipeline.ExecuteAsync(args);
 
         result.Should().Be(PipelineResult.Abort);
         // c ran (and aborted); d did not. Undo is reverse order across executed tasks;
@@ -66,7 +68,7 @@ public class PipelineTests
     }
 
     [Fact]
-    public void Fail_Short_Circuits_And_Returns_Fail()
+    public async Task Fail_Short_Circuits_And_Returns_Fail()
     {
         var args = new Args();
         var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
@@ -76,14 +78,14 @@ public class PipelineTests
             new OkTask("c"),
         });
 
-        var result = pipeline.Execute(args);
+        var result = await pipeline.ExecuteAsync(args);
 
         result.Should().Be(PipelineResult.Fail);
         args.Log.Should().Equal("a:exec", "b:exec");
     }
 
     [Fact]
-    public void Exception_Is_Wrapped_In_PipelineException_And_Undo_Is_Attempted()
+    public async Task Exception_Is_Wrapped_In_PipelineException_And_Undo_Is_Attempted()
     {
         var args = new Args();
         var inner = new InvalidOperationException("boom");
@@ -93,12 +95,10 @@ public class PipelineTests
             new ThrowingTask("b", inner),
         });
 
-        var act = () => pipeline.Execute(args);
+        var act = async () => await pipeline.ExecuteAsync(args);
 
-        var ex = act.Should().Throw<PipelineException>()
-            .WithInnerException<InvalidOperationException>()
-            .Which;
-        ex.Message.Should().Be(inner.Message);
+        var thrown = await act.Should().ThrowAsync<PipelineException>();
+        thrown.Which.InnerException.Should().BeSameAs(inner);
 
         // a was executed and undone; b threw before returning.
         args.Log.Should().Equal("a:exec", "b:exec", "a:undo");
@@ -106,7 +106,7 @@ public class PipelineTests
     }
 
     [Fact]
-    public void Undo_Skips_NonUndoable_Tasks()
+    public async Task Undo_Skips_NonUndoable_Tasks()
     {
         var args = new Args();
         var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
@@ -116,13 +116,13 @@ public class PipelineTests
             new ResultTask("c", PipelineResult.Fail),
         });
 
-        pipeline.Execute(args).Should().Be(PipelineResult.Fail);
+        (await pipeline.ExecuteAsync(args)).Should().Be(PipelineResult.Fail);
 
         args.Log.Should().Equal("a:exec", "b:exec", "c:exec", "a:undo");
     }
 
     [Fact]
-    public void Undo_Exception_Is_Logged_But_Original_Is_Still_Thrown()
+    public async Task Undo_Exception_Is_Logged_But_Original_Is_Still_Thrown()
     {
         var args = new Args();
         var inner = new InvalidOperationException("exec-boom");
@@ -133,12 +133,11 @@ public class PipelineTests
             new ThrowingTask("b", inner),
         });
 
-        var act = () => pipeline.Execute(args);
+        var act = async () => await pipeline.ExecuteAsync(args);
 
         // The execute-phase exception is the primary cause; undo failure is logged.
-        act.Should().Throw<PipelineException>()
-           .WithInnerException<InvalidOperationException>()
-           .Which.Message.Should().Be(inner.Message);
+        var thrown = await act.Should().ThrowAsync<PipelineException>();
+        thrown.Which.InnerException.Should().BeSameAs(inner);
 
         pipeline.Logged.Should().HaveCount(2);
         pipeline.Logged.Should().Contain(entry => entry.Exception == inner);
@@ -146,10 +145,10 @@ public class PipelineTests
     }
 
     [Fact]
-    public void Empty_Task_List_Returns_Ok_Without_Error()
+    public async Task Empty_Task_List_Returns_Ok_Without_Error()
     {
         var pipeline = new RecordingPipeline<Args>(new List<IPipelineTask<Args>>());
-        pipeline.Execute(new Args()).Should().Be(PipelineResult.Ok);
+        (await pipeline.ExecuteAsync(new Args())).Should().Be(PipelineResult.Ok);
     }
 
     [Fact]
@@ -165,5 +164,107 @@ public class PipelineTests
         var tasks = new IPipelineTask<Args>[] { new OkTask("a") };
         var pipeline = new RecordingPipeline<Args>(tasks);
         pipeline.Tasks.Should().BeSameAs(tasks);
+    }
+
+    [Fact]
+    public async Task Pre_Cancelled_Token_Throws_Before_Any_Task_Runs()
+    {
+        var args = new Args();
+        var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[] { new OkTask("a") });
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var act = async () => await pipeline.ExecuteAsync(args, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        // No task ran, no undo to run.
+        args.Log.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Cancellation_Mid_Pipeline_Triggers_Undo_And_Rethrows_OCE_Unwrapped()
+    {
+        var args = new Args();
+        using var cts = new CancellationTokenSource();
+
+        // Second task cancels the token from inside ExecuteAsync, then observes it.
+        var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
+        {
+            new UndoableTask("a"),
+            new CancellationAwareTask("b", cts),
+            new OkTask("c"),
+        });
+
+        var act = async () => await pipeline.ExecuteAsync(args, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        // a executed and was undone; b executed (and threw OCE); c never ran.
+        args.Log.Should().Equal("a:exec", "b:exec", "b:undo", "a:undo");
+        // OCE is NOT logged via Pipeline<T>.Log — control flow, not an error.
+        pipeline.Logged.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Cancellation_Between_Tasks_Triggers_Undo_And_Rethrows_OCE()
+    {
+        var args = new Args();
+        using var cts = new CancellationTokenSource();
+
+        // First task cancels the token after running. The pipeline detects the cancellation
+        // at the next task boundary (before the second task runs) and rolls back.
+        var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
+        {
+            new CancellationOnExitTask("a", cts),
+            new OkTask("b"),
+        });
+
+        var act = async () => await pipeline.ExecuteAsync(args, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        args.Log.Should().Equal("a:exec", "a:undo");
+    }
+
+    [Fact]
+    public async Task Default_Cancellation_Token_Works_Like_None()
+    {
+        var args = new Args();
+        var pipeline = new RecordingPipeline<Args>(new IPipelineTask<Args>[]
+        {
+            new OkTask("a"),
+            new OkTask("b"),
+        });
+
+        // No token argument == CancellationToken.None — never cancelled.
+        var result = await pipeline.ExecuteAsync(args);
+        result.Should().Be(PipelineResult.Ok);
+        args.Log.Should().Equal("a:exec", "b:exec");
+    }
+
+    private sealed class CancellationOnExitTask : IUndoablePipelineTask<Args>
+    {
+        private readonly string id;
+        private readonly CancellationTokenSource trigger;
+
+        public CancellationOnExitTask(string id, CancellationTokenSource trigger)
+        {
+            this.id = id;
+            this.trigger = trigger;
+        }
+
+        public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
+        {
+            args.Log.Add($"{id}:exec");
+            trigger.Cancel();
+            return Task.FromResult(PipelineResult.Ok);
+        }
+
+        public Task<PipelineResult> UndoAsync(Args args, CancellationToken cancellationToken = default)
+        {
+            args.Log.Add($"{id}:undo");
+            return Task.FromResult(PipelineResult.Ok);
+        }
     }
 }

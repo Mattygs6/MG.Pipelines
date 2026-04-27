@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 
 using AwesomeAssertions;
 
@@ -45,7 +46,7 @@ public class AddPipelinesTests
     }
 
     [Fact]
-    public void Factory_Resolves_Pipeline_And_Executes_Tasks_Through_DI()
+    public async Task Factory_Resolves_Pipeline_And_Executes_Tasks_Through_DI()
     {
         var services = new ServiceCollection();
         services.AddSingleton<Counter>();
@@ -60,7 +61,7 @@ public class AddPipelinesTests
         pipeline.Should().NotBeNull();
 
         var args = new Args();
-        pipeline!.Execute(args).Should().Be(PipelineResult.Ok);
+        (await pipeline!.ExecuteAsync(args)).Should().Be(PipelineResult.Ok);
 
         counter.Value.Should().Be(8); // (3+1)*2
         args.Log.Should().Equal("inc=4", "dbl=8");
@@ -80,7 +81,7 @@ public class AddPipelinesTests
     }
 
     [Fact]
-    public void Factory_Consults_Custom_Resolver_In_Order()
+    public async Task Factory_Consults_Custom_Resolver_In_Order()
     {
         var services = new ServiceCollection();
         services.AddSingleton<Counter>();
@@ -96,7 +97,7 @@ public class AddPipelinesTests
         // PrefixResolver returns ["arithmetic:specific", "arithmetic"] — the ":specific" variant wins.
         // SpecificArithmeticPipeline is Double then Increment: (5*2)+1 = 11.
         var args = new Args();
-        factory.Create<Args>("arithmetic")!.Execute(args).Should().Be(PipelineResult.Ok);
+        (await factory.Create<Args>("arithmetic")!.ExecuteAsync(args)).Should().Be(PipelineResult.Ok);
 
         counter.Value.Should().Be(11);
         args.Log.Should().Equal("dbl=10", "inc=11");

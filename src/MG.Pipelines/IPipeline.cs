@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace MG.Pipelines;
 
@@ -10,5 +12,7 @@ public interface IPipeline<T>
     IList<IPipelineTask<T>> Tasks { get; }
 
     /// <summary>Executes the pipeline against the supplied argument.</summary>
-    PipelineResult Execute(T args);
+    /// <param name="args">The pipeline argument.</param>
+    /// <param name="cancellationToken">Propagated cancellation. Cancelling triggers rollback and rethrows <see cref="System.OperationCanceledException"/>.</param>
+    Task<PipelineResult> ExecuteAsync(T args, CancellationToken cancellationToken = default);
 }

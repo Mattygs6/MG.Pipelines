@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace MG.Pipelines;
 
@@ -9,6 +11,13 @@ namespace MG.Pipelines;
 /// When a task fails or throws, previously executed <see cref="IUndoablePipelineTask{T}"/> instances
 /// are rolled back in reverse order.
 /// </summary>
+/// <remarks>
+/// Cancellation: when the supplied <see cref="CancellationToken"/> is cancelled, the pipeline stops
+/// at the next task boundary and triggers rollback. The <see cref="OperationCanceledException"/>
+/// is rethrown to the caller <em>unwrapped</em> (it does not become a <see cref="PipelineException"/>).
+/// Undo runs with the same (cancelled) token; override <see cref="UndoAsync"/> to use a different
+/// token if cleanup work must be allowed to complete.
+/// </remarks>
 /// <typeparam name="T">The pipeline argument type.</typeparam>
 public abstract class Pipeline<T> : IPipeline<T>
 {
@@ -24,21 +33,36 @@ public abstract class Pipeline<T> : IPipeline<T>
 
     /// <inheritdoc/>
     /// <exception cref="PipelineException">An unhandled exception occurred while running a task or rolling back.</exception>
-    public PipelineResult Execute(T args)
+    /// <exception cref="OperationCanceledException">The supplied <paramref name="cancellationToken"/> was cancelled.</exception>
+    public async Task<PipelineResult> ExecuteAsync(T args, CancellationToken cancellationToken = default)
     {
         var pipelineResult = PipelineResult.Ok;
         var executedTasks = new List<IPipelineTask<T>>();
         var isAborted = false;
         Exception? exception = null;
+        OperationCanceledException? cancellation = null;
 
         foreach (var task in Tasks)
         {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                cancellation = new OperationCanceledException(cancellationToken);
+                isAborted = true;
+                break;
+            }
+
             executedTasks.Add(task);
 
             PipelineResult taskResult;
             try
             {
-                taskResult = task.Execute(args);
+                taskResult = await task.ExecuteAsync(args, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException oce)
+            {
+                cancellation = oce;
+                isAborted = true;
+                break;
             }
             catch (Exception ex)
             {
@@ -67,17 +91,27 @@ public abstract class Pipeline<T> : IPipeline<T>
         {
             try
             {
-                Undo(executedTasks, args);
+                await UndoAsync(executedTasks, args, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation during undo is expected if the same token is in use; surface the
+                // original cancellation to the caller rather than masking it.
             }
             catch (Exception ex)
             {
-                // Preserve the originating exception (if any) as the cause; log the undo failure.
                 Log(ex, FormatMessage("undoing"));
-                exception ??= ex;
+                // The original cause (task exception or cancellation) takes precedence.
+                exception ??= cancellation is null ? ex : null;
             }
         }
 
-        if (exception != null)
+        if (cancellation is not null)
+        {
+            throw cancellation;
+        }
+
+        if (exception is not null)
         {
             throw new PipelineException(FormatMessage("processing"), exception);
         }
@@ -93,13 +127,13 @@ public abstract class Pipeline<T> : IPipeline<T>
     /// <see cref="IUndoablePipelineTask{T}"/> are rolled back; others are skipped.
     /// The task that aborted or threw is included in the rollback set.
     /// </summary>
-    protected virtual void Undo(IList<IPipelineTask<T>> executedTasks, T args)
+    protected virtual async Task UndoAsync(IList<IPipelineTask<T>> executedTasks, T args, CancellationToken cancellationToken)
     {
         for (var i = executedTasks.Count - 1; i >= 0; i--)
         {
             if (executedTasks[i] is IUndoablePipelineTask<T> undoable)
             {
-                undoable.Undo(args);
+                await undoable.UndoAsync(args, cancellationToken).ConfigureAwait(false);
             }
         }
     }

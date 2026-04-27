@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace MG.Pipelines.Tests.TestSupport;
 
@@ -14,10 +16,10 @@ public sealed class OkTask : IPipelineTask<Args>
 
     public OkTask(string id) { Id = id; }
 
-    public PipelineResult Execute(Args args)
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
     {
         args.Log.Add($"{Id}:exec");
-        return PipelineResult.Ok;
+        return Task.FromResult(PipelineResult.Ok);
     }
 }
 
@@ -28,10 +30,10 @@ public sealed class ResultTask : IPipelineTask<Args>
 
     public ResultTask(string id, PipelineResult result) { Id = id; Result = result; }
 
-    public PipelineResult Execute(Args args)
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
     {
         args.Log.Add($"{Id}:exec");
-        return Result;
+        return Task.FromResult(Result);
     }
 }
 
@@ -42,7 +44,7 @@ public sealed class ThrowingTask : IPipelineTask<Args>
 
     public ThrowingTask(string id, Exception exception) { Id = id; Exception = exception; }
 
-    public PipelineResult Execute(Args args)
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
     {
         args.Log.Add($"{Id}:exec");
         throw Exception;
@@ -56,16 +58,16 @@ public sealed class UndoableTask : IUndoablePipelineTask<Args>
 
     public UndoableTask(string id, PipelineResult result = PipelineResult.Ok) { Id = id; Result = result; }
 
-    public PipelineResult Execute(Args args)
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
     {
         args.Log.Add($"{Id}:exec");
-        return Result;
+        return Task.FromResult(Result);
     }
 
-    public PipelineResult Undo(Args args)
+    public Task<PipelineResult> UndoAsync(Args args, CancellationToken cancellationToken = default)
     {
         args.Log.Add($"{Id}:undo");
-        return PipelineResult.Ok;
+        return Task.FromResult(PipelineResult.Ok);
     }
 }
 
@@ -76,11 +78,39 @@ public sealed class ThrowingUndoTask : IUndoablePipelineTask<Args>
 
     public ThrowingUndoTask(string id, Exception undoException) { Id = id; UndoException = undoException; }
 
-    public PipelineResult Execute(Args args)
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
     {
         args.Log.Add($"{Id}:exec");
-        return PipelineResult.Ok;
+        return Task.FromResult(PipelineResult.Ok);
     }
 
-    public PipelineResult Undo(Args args) => throw UndoException;
+    public Task<PipelineResult> UndoAsync(Args args, CancellationToken cancellationToken = default) =>
+        throw UndoException;
+}
+
+/// <summary>A task that observes the cancellation token and throws <see cref="OperationCanceledException"/> when cancelled.</summary>
+public sealed class CancellationAwareTask : IUndoablePipelineTask<Args>
+{
+    public string Id { get; }
+    public CancellationTokenSource? Trigger { get; }
+
+    public CancellationAwareTask(string id, CancellationTokenSource? trigger = null)
+    {
+        Id = id;
+        Trigger = trigger;
+    }
+
+    public Task<PipelineResult> ExecuteAsync(Args args, CancellationToken cancellationToken = default)
+    {
+        args.Log.Add($"{Id}:exec");
+        Trigger?.Cancel();
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(PipelineResult.Ok);
+    }
+
+    public Task<PipelineResult> UndoAsync(Args args, CancellationToken cancellationToken = default)
+    {
+        args.Log.Add($"{Id}:undo");
+        return Task.FromResult(PipelineResult.Ok);
+    }
 }

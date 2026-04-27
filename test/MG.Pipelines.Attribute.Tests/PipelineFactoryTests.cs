@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 
 using AwesomeAssertions;
 
@@ -19,7 +20,7 @@ public class PipelineFactoryTests
     }
 
     [Fact]
-    public void Create_Resolves_Registered_Pipeline()
+    public async Task Create_Resolves_Registered_Pipeline()
     {
         var factory = new PipelineFactory();
         var pipeline = factory.Create<ArgsA>("pipeline-a");
@@ -28,7 +29,7 @@ public class PipelineFactoryTests
         pipeline!.Tasks.Should().HaveCount(2);
 
         var args = new ArgsA();
-        pipeline.Execute(args).Should().Be(PipelineResult.Ok);
+        (await pipeline.ExecuteAsync(args)).Should().Be(PipelineResult.Ok);
         args.Log.Should().Equal("A1", "A2");
     }
 

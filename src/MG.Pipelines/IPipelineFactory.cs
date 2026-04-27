@@ -14,7 +14,7 @@ public interface IPipelineFactory
     /// <summary>
     /// Creates a fresh argument instance for the named pipeline, with any registered defaults
     /// (e.g. configuration-bound properties) applied. The returned instance is intended to be
-    /// further mutated by the caller before being passed to <see cref="IPipeline{T}.Execute"/>.
+    /// further mutated by the caller before being passed to <see cref="IPipeline{T}.ExecuteAsync"/>.
     /// </summary>
     /// <typeparam name="T">The pipeline argument type.</typeparam>
     /// <param name="name">The pipeline name. Implementations may ignore this when no per-name defaults exist.</param>
