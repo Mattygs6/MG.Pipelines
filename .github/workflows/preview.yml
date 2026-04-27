@@ -1,0 +1,70 @@
+name: preview
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pack-push:
+    runs-on: ubuntu-latest
+    name: pack & push preview
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      VERSION_SUFFIX: preview.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Validate NUGET_API_KEY is present
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::NUGET_API_KEY secret is not set. Add it under Settings → Secrets → Actions."
+            exit 1
+          fi
+
+      - name: Restore
+        run: dotnet restore MG.Pipelines.sln
+
+      - name: Build
+        run: dotnet build MG.Pipelines.sln --configuration Release --no-restore -p:VersionSuffix=$VERSION_SUFFIX
+
+      - name: Test
+        run: dotnet test MG.Pipelines.sln --configuration Release --no-build
+
+      - name: Pack
+        run: |
+          mkdir -p artifacts
+          for proj in src/MG.Pipelines/MG.Pipelines.csproj \
+                     src/MG.Pipelines.Attribute/MG.Pipelines.Attribute.csproj \
+                     src/MG.Pipelines.DependencyInjection/MG.Pipelines.DependencyInjection.csproj \
+                     src/MG.Pipelines.Configuration/MG.Pipelines.Configuration.csproj; do
+            dotnet pack "$proj" --configuration Release --no-build --output artifacts -p:VersionSuffix=$VERSION_SUFFIX
+          done
+
+      - name: Upload packages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg-preview-${{ github.run_number }}
+          path: artifacts/*
+
+      - name: Push to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          dotnet nuget push "artifacts/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

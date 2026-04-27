@@ -1,56 +1,73 @@
-﻿namespace MG.Pipelines.Attribute
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace MG.Pipelines.Attribute;
+
+/// <summary>
+/// An <see cref="IPipelineFactory"/> backed by the static <see cref="Registration.Pipelines"/> map.
+/// Tasks are instantiated via cached compiled-expression activators.
+/// </summary>
+public class PipelineFactory : IPipelineFactory
 {
-	using System.Collections.Generic;
-	using System.Linq;
+    /// <summary>A default process-wide instance that uses the default <see cref="PipelineNameResolver"/>.</summary>
+    public static readonly IPipelineFactory Instance = new PipelineFactory();
 
-	public class PipelineFactory : IPipelineFactory
-	{
-		/// <summary>
-		/// The PipelineFactory instance
-		/// </summary>
-		public static IPipelineFactory Instance = new PipelineFactory();
+    private readonly IPipelineNameResolver nameResolver;
 
-		/// <summary>
-		/// Gets all the pipline names for the specified argument type.
-		/// </summary>
-		/// <typeparam name="T">The type of the pipeline argument</typeparam>
-		/// <returns/>
-		public IEnumerable<string> AllPipelinesFor<T>()
-		{
-			return Registration.Pipelines.Where(kvp => kvp.Value.Attribute.ArgumentType == typeof(T)).Select(kvp => kvp.Key);
-		}
+    /// <summary>Creates a factory with the default <see cref="PipelineNameResolver"/>.</summary>
+    public PipelineFactory() : this(new PipelineNameResolver())
+    {
+    }
 
-		/// <summary>
-		/// Creates the specified pipeline.
-		/// </summary>
-		/// <typeparam name="T">The type of the pipeline argument</typeparam>
-		/// <param name="name">The name.</param>
-		/// <returns/>
-		public IPipeline<T> Create<T>(string name)
-		{
-			PipelineRegistration registration;
-			if (!Registration.Pipelines.TryGetValue(name, out registration))
-			{
-				return null;
-			}
+    /// <summary>Creates a factory with a custom <see cref="IPipelineNameResolver"/>.</summary>
+    public PipelineFactory(IPipelineNameResolver nameResolver)
+    {
+        this.nameResolver = nameResolver ?? throw new ArgumentNullException(nameof(nameResolver));
+    }
 
-			var arguments = new List<IPipelineTask<T>>();
+    /// <inheritdoc/>
+    public IEnumerable<string> AllPipelinesFor<T>() =>
+        Registration.Pipelines
+            .Where(kvp => kvp.Value.Attribute.ArgumentType == typeof(T))
+            .Select(kvp => kvp.Key);
 
-			// ReSharper disable once LoopCanBeConvertedToQuery
-			foreach (var task in registration.Attribute.PipelineTasks)
-			{
-				var taskActivator = Reflection.GetActivator<IPipelineTask<T>>(task);
-				var taskInstance = taskActivator();
-				arguments.Add(taskInstance);
-			}
+    /// <inheritdoc/>
+    public IPipeline<T>? Create<T>(string name)
+    {
+        if (name is null)
+        {
+            throw new ArgumentNullException(nameof(name));
+        }
 
-			var pipelineActivator = Reflection.GetActivator<IPipeline<T>>(
-				registration.PipelineType,
-				typeof(IList<IPipelineTask<T>>));
+        foreach (var candidate in nameResolver.ResolveNames(name))
+        {
+            if (Registration.Pipelines.TryGetValue(candidate, out var registration))
+            {
+                return Build<T>(registration);
+            }
+        }
 
-			var pipeline = pipelineActivator(arguments);
+        return null;
+    }
 
-			return pipeline;
-		}
-	}
+    private static IPipeline<T> Build<T>(PipelineRegistration registration)
+    {
+        var tasks = new List<IPipelineTask<T>>(registration.Attribute.PipelineTasks.Length);
+        foreach (var taskType in registration.Attribute.PipelineTasks)
+        {
+            var taskActivator = Reflection.GetActivator<IPipelineTask<T>>(taskType)
+                ?? throw new PipelineAttributeRegistrationException(
+                    $"Task '{taskType.FullName}' has no parameterless constructor.");
+            tasks.Add(taskActivator());
+        }
+
+        var pipelineActivator = Reflection.GetActivator<IPipeline<T>>(
+                registration.PipelineType,
+                typeof(IList<IPipelineTask<T>>))
+            ?? throw new PipelineAttributeRegistrationException(
+                $"Pipeline '{registration.PipelineType.FullName}' has no constructor accepting IList<IPipelineTask<{typeof(T).Name}>>.");
+
+        return pipelineActivator(tasks);
+    }
 }

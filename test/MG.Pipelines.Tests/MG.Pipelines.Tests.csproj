@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MG.Pipelines.Tests</RootNamespace>
+    <AssemblyName>MG.Pipelines.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MG.Pipelines\MG.Pipelines.csproj" />
+  </ItemGroup>
+
+</Project>

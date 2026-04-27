@@ -1,22 +1,13 @@
-﻿namespace MG.Pipelines
+using System.Collections.Generic;
+
+namespace MG.Pipelines;
+
+/// <summary>Resolves named pipelines by argument type.</summary>
+public interface IPipelineFactory
 {
-	using System.Collections.Generic;
+    /// <summary>All registered pipeline names whose argument type is <typeparamref name="T"/>.</summary>
+    IEnumerable<string> AllPipelinesFor<T>();
 
-	public interface IPipelineFactory
-	{
-		/// <summary>
-		/// Gets all the piplines names for the specified argument type.
-		/// </summary>
-		/// <typeparam name="T">The type of the pipeline argument</typeparam>
-		/// <returns/>
-		IEnumerable<string> AllPipelinesFor<T>();
-
-		/// <summary>
-		/// Creates the specified pipeline.
-		/// </summary>
-		/// <typeparam name="T">The type of the pipeline argument</typeparam>
-		/// <param name="name">The name.</param>
-		/// <returns/>
-		IPipeline<T> Create<T>(string name);
-	}
+    /// <summary>Creates the named pipeline, or returns <see langword="null"/> if none is registered under that name.</summary>
+    IPipeline<T>? Create<T>(string name);
 }

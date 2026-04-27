@@ -1,98 +1,112 @@
-﻿namespace MG.Pipelines.Attribute
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+
+namespace MG.Pipelines.Attribute;
+
+/// <summary>
+/// Scans the current runtime for types that derive from a supplied ancestor. On first use it eagerly loads any
+/// DLLs found next to the executing assembly so that pipeline types declared in plug-in assemblies that have
+/// not yet been loaded by the runtime are discovered.
+/// </summary>
+public static class TypeLocator
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Diagnostics;
-	using System.IO;
-	using System.Linq;
-	using System.Reflection;
+    private static int assembliesForced;
 
-	public class TypeLocator
-	{
-		private static bool assembliesAlreadyForcedIntoAppDomain;
+    /// <summary>Resets the one-shot "force assemblies into the load context" flag. Primarily for tests.</summary>
+    public static void ResetAssemblyForcing() => System.Threading.Interlocked.Exchange(ref assembliesForced, 0);
 
-		/// <summary>
-		/// Locates the types.
-		/// </summary>
-		/// <param name="type">The type.</param>
-		/// <param name="includeAbstract">if set to <c>true</c> [include abstract].</param>
-		/// <returns/>
-		public static IEnumerable<Type> LocateTypes(Type type, bool includeAbstract = false)
-		{
-			if (!assembliesAlreadyForcedIntoAppDomain)
-			{
-				ForceAssembliesIntoAppDomain();
-				assembliesAlreadyForcedIntoAppDomain = true;
-			}
+    /// <summary>Returns every loaded concrete type assignable to <paramref name="ancestor"/>.</summary>
+    public static IEnumerable<Type> LocateTypes(Type ancestor, bool includeAbstract = false)
+    {
+        if (ancestor is null)
+        {
+            throw new ArgumentNullException(nameof(ancestor));
+        }
 
-			var types = new List<Type>();
-			foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-			{
-				try
-				{
-					types.AddRange(assembly.GetTypes());
-				}
-				catch (ReflectionTypeLoadException e)
-				{
-					types.AddRange(e.Types.Where(t => t != null));
-				}
-			}
+        if (System.Threading.Interlocked.CompareExchange(ref assembliesForced, 1, 0) == 0)
+        {
+            ForceAssembliesIntoLoadContext();
+        }
 
-			return types.Where(t => (includeAbstract || !t.IsAbstract) && Reflection.DescendsFromAncestorType(t, type));
-		}
+        var types = new List<Type>();
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (assembly.IsDynamic)
+            {
+                continue;
+            }
 
-		/// <summary>
-		/// Locates the types.
-		/// </summary>
-		/// <typeparam name="T"></typeparam>
-		/// <param name="includeAbstract">if set to <c>true</c> [include abstract].</param>
-		/// <returns/>
-		public static IEnumerable<Type> LocateTypes<T>(bool includeAbstract = false) where T : class
-		{
-			return LocateTypes(typeof(T));
-		}
+            try
+            {
+                types.AddRange(assembly.GetTypes());
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types.AddRange(ex.Types.Where(t => t is not null)!);
+            }
+        }
 
-		/// <summary>
-		/// Forces the assemblies into application domain.
-		/// </summary>
-		private static void ForceAssembliesIntoAppDomain()
-		{
-			// Get all currently loaded paths
-			var loadedAssemblies = AppDomain.CurrentDomain.GetAssemblies().ToList();
-			var loadedPaths = loadedAssemblies.Select(
-				a =>
-				{
-					try
-					{
-						return a.Location;
-					}
-					catch
-					{
-						Trace.WriteLine(string.Format("Unable to discover location from assembly {0}", a.FullName));
-						return null;
-					}
-				}).Where(a => a != null).ToArray();
+        return types.Where(t =>
+            t is not null
+            && (includeAbstract || !t.IsAbstract)
+            && !t.IsInterface
+            && Reflection.DescendsFromAncestorType(t, ancestor));
+    }
 
-			// Get the binary path of the application
-			var currentAssembly = Assembly.GetExecutingAssembly();
-			var currentAssemblyPath = currentAssembly.CodeBase;
-			var binPath = (new Uri(Path.GetDirectoryName(currentAssemblyPath))).LocalPath;
-			var referencedPaths = Directory.GetFiles(binPath, "*.dll", SearchOption.AllDirectories);
+    /// <summary>Generic convenience overload of <see cref="LocateTypes(Type, bool)"/>.</summary>
+    public static IEnumerable<Type> LocateTypes<T>(bool includeAbstract = false) where T : class =>
+        LocateTypes(typeof(T), includeAbstract);
 
-			// Get all assemblies in paths that are not already loaded
-			var toLoad = referencedPaths.Where(r => !loadedPaths.Contains(r, StringComparer.InvariantCultureIgnoreCase)).ToList();
-			toLoad.ForEach(
-				path =>
-				{
-					try
-					{
-						loadedAssemblies.Add(AppDomain.CurrentDomain.Load(AssemblyName.GetAssemblyName(path)));
-					}
-					catch (Exception ex)
-					{
-						Trace.WriteLine(string.Format("Unable to load assembly from {0}, Error Message: {1}", path, ex.Message));
-					}
-				});
-		}
-	}
+    private static void ForceAssembliesIntoLoadContext()
+    {
+        var loadedPaths = AppDomain.CurrentDomain.GetAssemblies()
+            .Where(a => !a.IsDynamic)
+            .Select(TryGetLocation)
+            .Where(p => !string.IsNullOrEmpty(p))
+            .ToArray();
+
+        var baseDirectory = AppContext.BaseDirectory;
+        string[] candidates;
+        try
+        {
+            candidates = Directory.GetFiles(baseDirectory, "*.dll", SearchOption.AllDirectories);
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"TypeLocator: unable to enumerate '{baseDirectory}': {ex.Message}");
+            return;
+        }
+
+        var toLoad = candidates
+            .Where(p => !loadedPaths.Contains(p, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+
+        foreach (var path in toLoad)
+        {
+            try
+            {
+                Assembly.LoadFrom(path);
+            }
+            catch (Exception ex)
+            {
+                Trace.WriteLine($"TypeLocator: unable to load '{path}': {ex.Message}");
+            }
+        }
+    }
+
+    private static string? TryGetLocation(Assembly assembly)
+    {
+        try
+        {
+            return assembly.Location;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }

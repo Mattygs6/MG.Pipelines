@@ -1,174 +1,155 @@
-﻿namespace MG.Pipelines.Attribute
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Reflection;
+
+namespace MG.Pipelines.Attribute;
+
+/// <summary>
+/// Compiled-expression activators and type-relationship helpers.
+/// </summary>
+internal static class Reflection
 {
-	using System;
-	using System.Collections.Concurrent;
-	using System.Collections.Generic;
-	using System.Linq;
-	using System.Linq.Expressions;
-	using System.Reflection;
+    public delegate T CompiledActivator<out T>(params object[] args);
 
-	internal static class Reflection
-	{
-		public delegate T CompiledActivator<out T>(params object[] args);
+    private static readonly ConcurrentDictionary<ActivatorKey, CompiledActivator<object>?> Activators = new();
 
-		/// <summary>
-		/// The activators
-		/// </summary>
-		public static readonly ConcurrentDictionary<Type, CompiledActivator<object>> Activators =
-			new ConcurrentDictionary<Type, CompiledActivator<object>>();
+    /// <summary>
+    /// Returns a compiled activator that constructs <paramref name="type"/> using the constructor whose
+    /// parameters match <paramref name="parameterTypes"/>, or <see langword="null"/> if no such constructor exists.
+    /// </summary>
+    public static CompiledActivator<T>? GetActivator<T>(Type type, params Type[] parameterTypes)
+    {
+        var key = new ActivatorKey(type, parameterTypes);
+        var boxed = Activators.GetOrAdd(key, static k =>
+        {
+            var ctor = FindConstructor(k.Type, k.ParameterTypes);
+            return ctor is null ? null : BuildBoxedActivator(ctor);
+        });
 
-		/// <summary>
-		/// Creates the activator.
-		/// </summary>
-		/// <typeparam name="T"></typeparam>
-		/// <param name="constructor">The constructor.</param>
-		/// <returns/>
-		public static CompiledActivator<T> CreateActivator<T>(ConstructorInfo constructor)
-		{
-			var parameters = constructor.GetParameters();
-			var parameterExpression = Expression.Parameter(typeof(object[]), "args");
-			var expressionArray = new Expression[parameters.Length];
-			for (var index1 = 0; index1 < parameters.Length; ++index1)
-			{
-				Expression index2 = Expression.Constant(index1);
-				var parameterType = parameters[index1].ParameterType;
-				Expression expression = Expression.Convert(Expression.ArrayIndex(parameterExpression, index2), parameterType);
-				expressionArray[index1] = expression;
-			}
-			return
-				(CompiledActivator<T>)
-				Expression.Lambda(typeof(CompiledActivator<T>), Expression.New(constructor, expressionArray), parameterExpression)
-					.Compile();
-		}
+        return boxed is null ? null : (args => (T)boxed(args));
+    }
 
-		/// <summary>
-		/// Creates a generic type with the specific arguments and parameters.
-		/// </summary>
-		/// <param name="type">The type.</param>
-		/// <param name="arguments">The arguments.</param>
-		/// <param name="parameters">The parameters.</param>
-		/// <returns/>
-		public static object CreateGenericType(Type type, Type[] arguments, params object[] parameters)
-		{
-			var forType = type.MakeGenericType(arguments);
-			object obj;
-			if (parameters != null && parameters.Any())
-			{
-				var parameterTypes = parameters.Select(p => p.GetType()).ToArray();
-				obj = GetActivator(forType, parameterTypes)(parameters);
-			}
-			else
-			{
-				obj = GetActivator(forType)();
-			}
-			return obj;
-		}
+    /// <summary>Returns <see langword="true"/> if <paramref name="type"/> derives from or implements <paramref name="ancestor"/> (supports open generics).</summary>
+    public static bool DescendsFromAncestorType(Type? type, Type ancestor)
+    {
+        while (type is not null && type != typeof(object))
+        {
+            if (ancestor.IsAssignableFrom(type))
+            {
+                return true;
+            }
 
-		/// <summary>
-		///     Determines if the Type descends from the supplied ancestor Type.
-		/// </summary>
-		/// <param name="type">The Type to test.</param>
-		/// <param name="ancestor">The Type that must be inherited.</param>
-		/// <returns>True if the Type inherits from the ancestor Type.</returns>
-		public static bool DescendsFromAncestorType(Type type, Type ancestor)
-		{
-			while (true)
-			{
-				if (type == null || type == typeof(object))
-				{
-					return false;
-				}
+            if (ancestor.IsGenericType && DescendsFromGeneric(type, ancestor))
+            {
+                return true;
+            }
 
-				if (ancestor.IsAssignableFrom(type))
-				{
-					return true;
-				}
+            type = type.BaseType;
+        }
 
-				if (ancestor.IsGenericType && DescendsFromGeneric(type, ancestor))
-				{
-					return true;
-				}
+        return false;
+    }
 
-				type = type.BaseType;
-			}
-		}
+    private static bool DescendsFromGeneric(Type? type, Type ancestor)
+    {
+        while (type is not null && type != typeof(object))
+        {
+            if (type.IsGenericType && type.GetGenericTypeDefinition() == ancestor)
+            {
+                return true;
+            }
 
-		/// <summary>
-		/// Gets the activator.
-		/// </summary>
-		/// <typeparam name="T">The result Type from invoking the activator</typeparam>
-		/// <param name="type">The type.</param>
-		/// <param name="args">The arguments.</param>
-		/// <returns/>
-		public static CompiledActivator<T> GetActivator<T>(Type type, params Type[] args)
-		{
-			var constructors = type.GetConstructors();
-			var constructor = args == null
-								? constructors.FirstOrDefault(ci => !ci.GetParameters().Any())
-								: constructors.FirstOrDefault(
-									ci =>
-									SequenceEqual(
-										ci.GetParameters().Select(p => p.ParameterType),
-										args,
-										(type1, type2) => type1.IsAssignableFrom(type2)));
+            foreach (var @interface in type.GetInterfaces())
+            {
+                if (@interface.IsGenericType && @interface.GetGenericTypeDefinition() == ancestor)
+                {
+                    return true;
+                }
+            }
 
-			return constructor != null ? CreateActivator<T>(constructor) : null;
-		}
+            type = type.BaseType;
+        }
 
-		/// <summary>
-		///     Gets the activator.
-		/// </summary>
-		/// <param name="forType">For type.</param>
-		/// <param name="parameterTypes">The parameter types.</param>
-		/// <returns />
-		internal static CompiledActivator<object> GetActivator(Type forType, Type[] parameterTypes = null)
-		{
-			return Activators.GetOrAdd(forType, type => GetActivator<object>(type, parameterTypes));
-		}
+        return false;
+    }
 
-		/// <summary>
-		///     Determines if the Type implements the ancestor Generic.
-		/// </summary>
-		/// <param name="type">The Type to test.</param>
-		/// <param name="ancestor">The Generic type that must be implemented.</param>
-		/// <returns>True if the Type implements the ancestor Type.</returns>
-		private static bool DescendsFromGeneric(Type type, Type ancestor)
-		{
-			if (type == null || type == typeof(object))
-			{
-				return false;
-			}
+    private static ConstructorInfo? FindConstructor(Type type, Type[] parameterTypes)
+    {
+        var ctors = type.GetConstructors();
+        if (parameterTypes.Length == 0)
+        {
+            return ctors.FirstOrDefault(c => c.GetParameters().Length == 0);
+        }
 
-			if (type.IsGenericType && type.GetGenericTypeDefinition() == ancestor)
-			{
-				return true;
-			}
+        return ctors.FirstOrDefault(c =>
+        {
+            var ps = c.GetParameters();
+            if (ps.Length != parameterTypes.Length)
+            {
+                return false;
+            }
 
-			var interfaceTypes = type.GetInterfaces();
+            for (var i = 0; i < ps.Length; i++)
+            {
+                if (!ps[i].ParameterType.IsAssignableFrom(parameterTypes[i]))
+                {
+                    return false;
+                }
+            }
 
-			// ReSharper disable once LoopCanBeConvertedToQuery
-			foreach (var i in interfaceTypes)
-			{
-				if (i.IsGenericType && i.GetGenericTypeDefinition() == ancestor)
-				{
-					return true;
-				}
-			}
+            return true;
+        });
+    }
 
-			return DescendsFromAncestorType(type.BaseType, ancestor);
-		}
+    private static CompiledActivator<object> BuildBoxedActivator(ConstructorInfo constructor)
+    {
+        var parameters = constructor.GetParameters();
+        var argsParameter = Expression.Parameter(typeof(object[]), "args");
+        var argExpressions = new Expression[parameters.Length];
 
-		/// <summary>
-		/// Determines if the two sequences are equal
-		/// </summary>
-		/// <typeparam name="T"></typeparam>
-		/// <param name="source">The source.</param>
-		/// <param name="second">The second.</param>
-		/// <param name="comparer">The comparer.</param>
-		/// <returns>True if the sequences are equal</returns>
-		private static bool SequenceEqual<T>(this IEnumerable<T> source, IEnumerable<T> second, Func<T, T, bool> comparer)
-		{
-			return source.SequenceEqual(second, new LambdaComparer<T>(comparer));
-		}
-	}
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var indexed = Expression.ArrayIndex(argsParameter, Expression.Constant(i));
+            argExpressions[i] = Expression.Convert(indexed, parameters[i].ParameterType);
+        }
+
+        var newExpression = Expression.New(constructor, argExpressions);
+        var body = Expression.Convert(newExpression, typeof(object));
+
+        return Expression.Lambda<CompiledActivator<object>>(body, argsParameter).Compile();
+    }
+
+    private readonly struct ActivatorKey : IEquatable<ActivatorKey>
+    {
+        public readonly Type Type;
+        public readonly Type[] ParameterTypes;
+
+        public ActivatorKey(Type type, Type[] parameterTypes)
+        {
+            Type = type;
+            ParameterTypes = parameterTypes;
+        }
+
+        public bool Equals(ActivatorKey other) =>
+            Type == other.Type && ParameterTypes.SequenceEqual(other.ParameterTypes);
+
+        public override bool Equals(object? obj) => obj is ActivatorKey k && Equals(k);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                var hash = Type.GetHashCode();
+                foreach (var p in ParameterTypes)
+                {
+                    hash = (hash * 397) ^ p.GetHashCode();
+                }
+
+                return hash;
+            }
+        }
+    }
 }

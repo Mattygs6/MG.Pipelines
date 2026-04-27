@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MG.Pipelines.Configuration</RootNamespace>
+    <AssemblyName>MG.Pipelines.Configuration</AssemblyName>
+    <PackageId>MG.Pipelines.Configuration</PackageId>
+    <Description>Bind MG.Pipelines registrations from Microsoft.Extensions.Configuration sources (appsettings.json, env vars, etc.).</Description>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="8.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MG.Pipelines\MG.Pipelines.csproj" />
+    <ProjectReference Include="..\MG.Pipelines.Attribute\MG.Pipelines.Attribute.csproj" />
+    <ProjectReference Include="..\MG.Pipelines.DependencyInjection\MG.Pipelines.DependencyInjection.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MG.Pipelines.Configuration.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,58 +1,55 @@
-﻿namespace MG.Pipelines.Attribute
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+
+namespace MG.Pipelines.Attribute;
+
+/// <summary>Scans assemblies for <see cref="PipelineAttribute"/> declarations and caches them by name.</summary>
+public static class Registration
 {
-	using System;
-	using System.Collections.Concurrent;
-	using System.Linq;
-	using System.Reflection;
+    /// <summary>All registered pipelines, keyed by <see cref="PipelineAttribute.Name"/>.</summary>
+    public static readonly ConcurrentDictionary<string, PipelineRegistration> Pipelines =
+        new(StringComparer.Ordinal);
 
-	public static class Registration
-	{
-		/// <summary>
-		/// The pipelines
-		/// </summary>
-		public static readonly ConcurrentDictionary<string, PipelineRegistration> Pipelines =
-			new ConcurrentDictionary<string, PipelineRegistration>(StringComparer.Ordinal);
+    /// <summary>Scans loaded assemblies (via <see cref="TypeLocator"/>) and records every valid <see cref="PipelineAttribute"/>.</summary>
+    /// <exception cref="PipelineAttributeRegistrationException">The attribute declares zero tasks, or a declared task type does not implement <see cref="IPipelineTask{T}"/> for the attribute's argument type.</exception>
+    public static void RegisterPipelines() => RegisterPipelines(TypeLocator.LocateTypes(typeof(IPipeline<>)));
 
-		/// <summary>
-		/// Registers the pipelines.
-		/// </summary>
-		/// <exception cref="PipelineAttributeRegistrationException">
-		/// Pipelines must have at least one task
-		/// or
-		/// Pipeline tasks must all have the same generic type agrument.
-		/// </exception>
-		public static void RegisterPipelines()
-		{
-			var types = TypeLocator.LocateTypes(typeof(IPipeline<>)).ToArray();
+    /// <summary>Records every valid <see cref="PipelineAttribute"/> on the supplied types. Useful when the caller has an explicit assembly list.</summary>
+    /// <exception cref="PipelineAttributeRegistrationException">The attribute declares zero tasks, or a declared task type does not implement <see cref="IPipelineTask{T}"/> for the attribute's argument type.</exception>
+    public static void RegisterPipelines(IEnumerable<Type> types)
+    {
+        if (types is null)
+        {
+            throw new ArgumentNullException(nameof(types));
+        }
 
-			foreach (var type in types)
-			{
-				var pipelineAttributes = type.GetCustomAttributes<PipelineAttribute>(false).ToArray();
+        foreach (var type in types)
+        {
+            foreach (var attribute in type.GetCustomAttributes<PipelineAttribute>(inherit: false))
+            {
+                if (attribute.PipelineTasks.Length == 0)
+                {
+                    throw new PipelineAttributeRegistrationException(
+                        $"Pipeline '{attribute.Name}' on '{type.FullName}' must declare at least one task.");
+                }
 
-				if (pipelineAttributes.Length == 0)
-				{
-					continue;
-				}
+                foreach (var taskType in attribute.PipelineTasks)
+                {
+                    if (!Reflection.DescendsFromAncestorType(taskType, attribute.TaskType))
+                    {
+                        throw new PipelineAttributeRegistrationException(
+                            $"Task '{taskType.FullName}' in pipeline '{attribute.Name}' must implement '{attribute.TaskType.FullName}'.");
+                    }
+                }
 
-				foreach (var attr in pipelineAttributes)
-				{
-					if (attr.PipelineTasks.Length == 0)
-					{
-						throw new PipelineAttributeRegistrationException("Pipelines must have at least one task");
-					}
+                Pipelines.TryAdd(attribute.Name, new PipelineRegistration(type, attribute));
+            }
+        }
+    }
 
-					// ReSharper disable once LoopCanBeConvertedToQuery
-					foreach (var pipelineTask in attr.PipelineTasks)
-					{
-						if (!Reflection.DescendsFromAncestorType(pipelineTask, attr.TaskType))
-						{
-							throw new PipelineAttributeRegistrationException("Pipeline tasks must all have the same generic type agrument.");
-						}
-					}
-
-					Pipelines.TryAdd(attr.Name, new PipelineRegistration{ PipelineType = type, Attribute = attr });
-				}
-			}
-		}
-	}
+    /// <summary>Clears all registrations. Primarily for tests.</summary>
+    public static void Clear() => Pipelines.Clear();
 }

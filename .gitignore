@@ -1,4 +1,40 @@
-_ReSharper.Caches/
-packages/
+## .NET / VS build artifacts
 bin/
 obj/
+out/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+## NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+## Test / coverage
+TestResults/
+*.coverage
+*.coveragexml
+coverage.*.xml
+coverage.*.json
+
+## IDE / tool caches
+.vs/
+.vscode/
+.idea/
+_ReSharper.Caches/
+*.DotSettings.user
+
+## OS
+.DS_Store
+Thumbs.db

@@ -1,57 +1,30 @@
-﻿namespace MG.Pipelines.Attribute
+using System;
+
+namespace MG.Pipelines.Attribute;
+
+/// <summary>Declares a named pipeline by associating an argument type and an ordered list of task types with a <see cref="Pipeline{T}"/>.</summary>
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
+public sealed class PipelineAttribute : System.Attribute
 {
-	using System;
+    /// <summary>The registration name (unique across the application).</summary>
+    public string Name { get; }
 
-	[AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
-	public class PipelineAttribute : Attribute
-	{
-		/// <summary>
-		/// Gets the name.
-		/// </summary>
-		/// <value>
-		/// The name.
-		/// </value>
-		public string Name { get; private set; }
+    /// <summary>The tasks to instantiate and inject into the pipeline, in order.</summary>
+    public Type[] PipelineTasks { get; }
 
-		/// <summary>
-		/// Gets the pipeline tasks.
-		/// </summary>
-		/// <value>
-		/// The pipeline tasks.
-		/// </value>
-		public Type[] PipelineTasks { get; private set; }
+    /// <summary>The pipeline argument type (the <c>T</c> in <see cref="Pipeline{T}"/>).</summary>
+    public Type ArgumentType { get; }
 
-		/// <summary>
-		/// Gets the type of the argument.
-		/// </summary>
-		/// <value>
-		/// The type of the argument.
-		/// </value>
-		public Type ArgumentType { get; private set; }
+    /// <summary>The resulting <see cref="IPipelineTask{T}"/> closed type, derived from <see cref="ArgumentType"/>.</summary>
+    public Type TaskType { get; }
 
-		/// <summary>
-		/// Gets the type of the task.
-		/// </summary>
-		/// <value>
-		/// The type of the task.
-		/// </value>
-		public Type TaskType { get; private set; }
-
-		/// <summary>
-		/// Initializes a new instance of the <see cref="PipelineAttribute"/> class.
-		/// </summary>
-		/// <param name="name">The name.</param>
-		/// <param name="argumentType">Type of the argument.</param>
-		/// <param name="pipelineTasks">The pipeline tasks.</param>
-		public PipelineAttribute(string name, Type argumentType, params Type[] pipelineTasks)
-		{
-			Name = name;
-
-			ArgumentType = argumentType;
-
-			TaskType = typeof(IPipelineTask<>).MakeGenericType(argumentType);
-
-			PipelineTasks = pipelineTasks;
-		}
-	}
+    /// <summary>Initializes a new <see cref="PipelineAttribute"/>.</summary>
+    /// <exception cref="ArgumentNullException">Any required argument is <see langword="null"/>.</exception>
+    public PipelineAttribute(string name, Type argumentType, params Type[] pipelineTasks)
+    {
+        Name = name ?? throw new ArgumentNullException(nameof(name));
+        ArgumentType = argumentType ?? throw new ArgumentNullException(nameof(argumentType));
+        PipelineTasks = pipelineTasks ?? throw new ArgumentNullException(nameof(pipelineTasks));
+        TaskType = typeof(IPipelineTask<>).MakeGenericType(argumentType);
+    }
 }
