@@ -224,7 +224,108 @@ derives via several layers of inheritance).
 
 ---
 
-## 5. Attribute + Configuration (override pattern)
+## 5. Setting args properties from configuration
+
+Each definition may include an `args` block. Its keys are bound onto a fresh
+args instance every time you call `factory.CreateArgs<T>(name)`, using the
+standard `Microsoft.Extensions.Configuration.Binder` (so nested objects, lists,
+enums, and DI-friendly args ctors all work).
+
+```jsonc
+{
+  "Pipelines": [
+    {
+      "name": "checkout",
+      "argumentType": "MyApp.CheckoutArgs, MyApp",
+      "tasks": [ "MyApp.Tasks.Validate, MyApp", "MyApp.Tasks.Charge, MyApp" ],
+      "args": {
+        "Currency": "USD",
+        "MaxRetries": 3,
+        "Tags": [ "alpha", "beta" ],
+        "Limits": { "DailyCap": 5000 }
+      }
+    }
+  ]
+}
+```
+
+```csharp
+public class CheckoutArgs
+{
+    public string Currency { get; set; } = "USD";
+    public int MaxRetries { get; set; } = 1;
+    public List<string> Tags { get; set; } = new();
+    public LimitsConfig? Limits { get; set; }
+
+    public string? CustomerId { get; set; }   // request-specific, set after CreateArgs
+    public decimal Total { get; set; }
+}
+
+public class LimitsConfig
+{
+    public int DailyCap { get; set; }
+}
+```
+
+```csharp
+services.AddLogging();
+services.AddPipelinesFromConfiguration(builder.Configuration.GetSection("Pipelines"));
+
+// ...
+var factory = provider.GetRequiredService<IPipelineFactory>();
+
+var args = factory.CreateArgs<CheckoutArgs>("checkout");
+// args.Currency == "USD", args.MaxRetries == 3, args.Tags == ["alpha","beta"],
+// args.Limits.DailyCap == 5000
+
+args.CustomerId = httpContext.User.Identity!.Name;     // request-specific overrides
+args.Total = cart.Total;
+
+factory.Create<CheckoutArgs>("checkout")!.Execute(args);
+```
+
+**Caller overrides win** — properties you set after `CreateArgs` are not
+overwritten. The binder is only invoked at instance creation.
+
+**Layering** — calling `AddPipelinesFromConfiguration` more than once
+accumulates entries from every source (e.g. `appsettings.json` + an environment
+overlay). When two sources define the same pipeline name, the later call's
+`args` block replaces the earlier one wholesale.
+
+**Without configuration** — `factory.CreateArgs<T>(name)` is always safe to
+call; if no `args` section is registered for that name, you simply get a
+default-constructed instance. Same call site works for attribute-only and
+DI-only registrations:
+
+```csharp
+// Works whether "checkout" was registered via [Pipeline], AddPipelines, or AddPipelinesFromConfiguration.
+var args = factory.CreateArgs<CheckoutArgs>("checkout");
+```
+
+**Args with DI dependencies** — the DI factory uses
+`ActivatorUtilities.CreateInstance<T>`, so args ctors can request services:
+
+```csharp
+public class CheckoutArgs
+{
+    public IClock Clock { get; }
+    public CheckoutArgs(IClock clock) { Clock = clock; }
+    public string? CustomerId { get; set; }
+}
+```
+
+Configuration values are bound on top of the DI-constructed instance.
+
+**Custom binders** — the contract is `IPipelineArgsBinder` (in
+`MG.Pipelines.DependencyInjection`). The Configuration package supplies an
+implementation, but you can register additional binders (registered binders
+run in registration order, mutating the same instance):
+
+```csharp
+services.AddSingleton<IPipelineArgsBinder, MyEnvironmentOverlayBinder>();
+```
+
+## 6. Attribute + Configuration (override pattern)
 
 Register pipelines from attributes for the default behaviour, then layer
 configuration on top to override task lists at deploy time.
@@ -269,7 +370,7 @@ check toggle via config:
 
 ---
 
-## 6. Custom name resolution
+## 7. Custom name resolution
 
 Implement `IPipelineNameResolver` to expand a logical name into multiple
 candidates (most-specific first). The factory tries each in order and returns
@@ -313,7 +414,7 @@ resolves `AcmeCheckoutPipeline`; everyone else falls through to
 
 ---
 
-## 7. Rollback (undoable tasks)
+## 8. Rollback (undoable tasks)
 
 Tasks that implement `IUndoablePipelineTask<T>` are rolled back in reverse
 order when a later task aborts, fails, or throws. Non-undoable tasks in the
@@ -339,7 +440,7 @@ on the first undo failure rather than continuing).
 
 ---
 
-## 8. Result semantics
+## 9. Result semantics
 
 ```csharp
 public PipelineResult Execute(CheckoutArgs args)
@@ -357,7 +458,7 @@ rollback.
 
 ---
 
-## 9. Putting it together (ASP.NET Core)
+## 10. Putting it together (ASP.NET Core)
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -369,8 +470,13 @@ builder.Services.AddPipelinesFromConfiguration(builder.Configuration.GetSection(
 
 var app = builder.Build();
 
-app.MapPost("/checkout", (CheckoutArgs args, IPipelineFactory factory) =>
+app.MapPost("/checkout", (CheckoutRequest request, IPipelineFactory factory) =>
 {
+    // Configured defaults applied; request data layered on top.
+    var args = factory.CreateArgs<CheckoutArgs>("checkout");
+    args.CustomerId = request.CustomerId;
+    args.Total = request.Total;
+
     var pipeline = factory.Create<CheckoutArgs>("checkout")
         ?? throw new InvalidOperationException("checkout pipeline is not registered");
 

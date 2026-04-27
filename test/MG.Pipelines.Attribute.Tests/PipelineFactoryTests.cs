@@ -81,6 +81,43 @@ public class PipelineFactoryTests
         act.Should().Throw<ArgumentNullException>();
     }
 
+    [Fact]
+    public void CreateArgs_Returns_Default_Constructed_Instance_Regardless_Of_Name()
+    {
+        var factory = new PipelineFactory();
+        // Attribute factory has no per-name configuration — CreateArgs always returns a fresh instance.
+        var argsA = factory.CreateArgs<ArgsA>("pipeline-a");
+        argsA.Should().NotBeNull();
+        argsA.Log.Should().BeEmpty();
+
+        // Even unregistered names produce a default instance.
+        var argsForUnknown = factory.CreateArgs<ArgsA>("does-not-exist");
+        argsForUnknown.Should().NotBeNull();
+        argsForUnknown.Log.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void CreateArgs_Null_Name_Throws()
+    {
+        var factory = new PipelineFactory();
+        var act = () => factory.CreateArgs<ArgsA>(null!);
+        act.Should().Throw<ArgumentNullException>();
+    }
+
+    [Fact]
+    public void CreateArgs_Throws_For_Type_Without_Parameterless_Constructor()
+    {
+        var factory = new PipelineFactory();
+        // NoDefaultCtor only declares a non-default constructor; Activator.CreateInstance throws.
+        var act = () => factory.CreateArgs<NoDefaultCtor>("pipeline-a");
+        act.Should().Throw<MissingMethodException>();
+    }
+
+    private sealed class NoDefaultCtor
+    {
+        public NoDefaultCtor(int _) { }
+    }
+
     private sealed class QueuedResolver : IPipelineNameResolver
     {
         private readonly string[] candidates;

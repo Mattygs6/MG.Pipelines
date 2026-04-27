@@ -79,3 +79,41 @@ public sealed class ExplicitConfigPipeline : Pipeline<CheckoutArgs>
     public ExplicitConfigPipeline(IList<IPipelineTask<CheckoutArgs>> tasks) : base(tasks) { }
     protected override void Log(Exception caughtException, string message) { }
 }
+
+/// <summary>An args type whose properties are bound from the <c>args</c> configuration block.</summary>
+public sealed class ConfigurableArgs
+{
+    public string Currency { get; set; } = "default-USD";
+    public int MaxRetries { get; set; } = 1;
+    public List<string> Tags { get; set; } = new();
+    public LimitsConfig? Limits { get; set; }
+
+    /// <summary>Captured by <see cref="ConfigArgsTask"/> at execute time.</summary>
+    public string? ObservedCurrency { get; set; }
+
+    /// <summary>Captured by <see cref="ConfigArgsTask"/> at execute time.</summary>
+    public int ObservedMaxRetries { get; set; }
+}
+
+public sealed class LimitsConfig
+{
+    public int DailyCap { get; set; }
+}
+
+public sealed class ConfigArgsTask : IPipelineTask<ConfigurableArgs>
+{
+    public PipelineResult Execute(ConfigurableArgs args)
+    {
+        args.ObservedCurrency = args.Currency;
+        args.ObservedMaxRetries = args.MaxRetries;
+        return PipelineResult.Ok;
+    }
+}
+
+/// <summary>An attribute-registered pipeline whose args are populated by configuration's args block.</summary>
+[Pipeline("configurable-attribute", typeof(ConfigurableArgs), typeof(ConfigArgsTask))]
+public sealed class ConfigurableAttributePipeline : Pipeline<ConfigurableArgs>
+{
+    public ConfigurableAttributePipeline(IList<IPipelineTask<ConfigurableArgs>> tasks) : base(tasks) { }
+    protected override void Log(Exception caughtException, string message) { }
+}

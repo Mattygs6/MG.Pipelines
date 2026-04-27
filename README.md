@@ -50,7 +50,7 @@ var factory = provider.GetRequiredService<IPipelineFactory>();
 var pipeline = factory.Create<MyArgs>("increment");
 ```
 
-**Configuration-based** — define new pipelines or override attribute pipelines from `appsettings.json` (or any `IConfiguration` source):
+**Configuration-based** — define new pipelines or override attribute pipelines from `appsettings.json` (or any `IConfiguration` source). Each definition can also include an `args` block whose properties are bound onto the args instance returned by `factory.CreateArgs<T>(name)`:
 
 ```jsonc
 {
@@ -58,16 +58,24 @@ var pipeline = factory.Create<MyArgs>("increment");
     {
       "name": "increment",
       "argumentType": "MyApp.MyArgs, MyApp",
-      "tasks": [ "MyApp.AddOne, MyApp" ]
+      "tasks": [ "MyApp.AddOne, MyApp" ],
+      "args": { "Step": 1, "MaxValue": 100 }
     },
     {
       "name": "increment:vip",
       "argumentType": "MyApp.MyArgs, MyApp",
       "pipelineType": "MyApp.VipIncrementPipeline, MyApp",
-      "tasks": [ "MyApp.AddOne, MyApp", "MyApp.AddTen, MyApp" ]
+      "tasks": [ "MyApp.AddOne, MyApp", "MyApp.AddTen, MyApp" ],
+      "args": { "Step": 10, "MaxValue": 1000 }
     }
   ]
 }
+```
+
+```csharp
+var args = factory.CreateArgs<MyArgs>("increment");   // Step=1, MaxValue=100 from config
+args.CustomerId = "abc";                                // request-specific overrides
+factory.Create<MyArgs>("increment")!.Execute(args);
 ```
 
 The schema is a JSON array (rather than a name-keyed object) so that pipeline names containing `:` work cleanly — `:` is the `IConfiguration` path separator and would otherwise collide with key flattening.
@@ -108,8 +116,8 @@ dotnet test -c Release
 ## Releases
 
 - CI runs on every push and PR (build + test on Ubuntu and Windows).
-- Pushes to `dev` publish preview packages (`2.0.0-preview.<run-number>`) to NuGet.org.
-- Tagging `v2.0.0` on `master` publishes stable `2.0.0` packages.
+- Pushes to `dev` publish preview packages (`2.0.1-preview.<run-number>`) to NuGet.org.
+- Tagging `v2.0.1` on `master` publishes stable `2.0.1` packages.
 
 ## License
 

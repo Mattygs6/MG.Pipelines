@@ -33,6 +33,22 @@ public class PipelineFactory : IPipelineFactory
             .Select(kvp => kvp.Key);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The <paramref name="name"/> parameter is accepted for interface compatibility but ignored — the
+    /// attribute-based factory has no per-name configuration. Returns a fresh instance via the public
+    /// parameterless constructor of <typeparamref name="T"/>.
+    /// </remarks>
+    public T CreateArgs<T>(string name)
+    {
+        if (name is null)
+        {
+            throw new ArgumentNullException(nameof(name));
+        }
+
+        return Activator.CreateInstance<T>();
+    }
+
+    /// <inheritdoc/>
     public IPipeline<T>? Create<T>(string name)
     {
         if (name is null)

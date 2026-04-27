@@ -54,4 +54,27 @@ public sealed class ServiceProviderPipelineFactory : IPipelineFactory
 
         return null;
     }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Constructs <typeparamref name="T"/> via <see cref="ActivatorUtilities.CreateInstance{T}(IServiceProvider, object[])"/>
+    /// (so DI dependencies on the args ctor are resolved), then applies any registered
+    /// <see cref="IPipelineArgsBinder"/> in turn. Multiple binders are applied in registration order.
+    /// </remarks>
+    public T CreateArgs<T>(string name)
+    {
+        if (name is null)
+        {
+            throw new ArgumentNullException(nameof(name));
+        }
+
+        var instance = ActivatorUtilities.CreateInstance<T>(serviceProvider);
+
+        foreach (var binder in serviceProvider.GetServices<IPipelineArgsBinder>())
+        {
+            binder.Bind(name, instance);
+        }
+
+        return instance;
+    }
 }

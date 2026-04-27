@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 using MG.Pipelines.Attribute;
 using MG.Pipelines.DependencyInjection;
@@ -40,11 +41,12 @@ public static class ConfigurationServiceCollectionExtensions
         services.TryAddSingleton<IPipelineNameResolver, PipelineNameResolver>();
         services.TryAddTransient<IPipelineFactory, ServiceProviderPipelineFactory>();
 
-        var definitions = configurationSection.Get<List<PipelineDefinition>>() ?? new List<PipelineDefinition>();
+        var argsBinder = GetOrAddArgsBinder(services);
 
         var seenNames = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var definition in definitions)
+        foreach (var entrySection in configurationSection.GetChildren())
         {
+            var definition = entrySection.Get<PipelineDefinition>();
             if (definition is null)
             {
                 throw new PipelineConfigurationException("Pipeline definition entry is null.");
@@ -62,9 +64,33 @@ public static class ConfigurationServiceCollectionExtensions
             }
 
             RegisterDefinition(services, definition.Name!, definition);
+
+            var argsSection = entrySection.GetSection("args");
+            if (argsSection.Exists())
+            {
+                argsBinder.SetArgsConfiguration(definition.Name!, argsSection);
+            }
         }
 
         return services;
+    }
+
+    private static ConfigurationPipelineArgsBinder GetOrAddArgsBinder(IServiceCollection services)
+    {
+        // Reuse a single mutable binder across multiple AddPipelinesFromConfiguration calls so that
+        // entries from layered config sources accumulate rather than overwrite.
+        var existing = services.FirstOrDefault(d =>
+            d.ServiceType == typeof(ConfigurationPipelineArgsBinder)
+            && d.ImplementationInstance is ConfigurationPipelineArgsBinder);
+        if (existing?.ImplementationInstance is ConfigurationPipelineArgsBinder current)
+        {
+            return current;
+        }
+
+        var binder = new ConfigurationPipelineArgsBinder();
+        services.AddSingleton(binder);
+        services.AddSingleton<IPipelineArgsBinder>(binder);
+        return binder;
     }
 
     private static void RegisterDefinition(IServiceCollection services, string name, PipelineDefinition definition)
