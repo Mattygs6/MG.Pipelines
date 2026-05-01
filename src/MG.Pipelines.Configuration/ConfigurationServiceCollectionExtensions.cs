@@ -124,7 +124,7 @@ public static class ConfigurationServiceCollectionExtensions
             throw new PipelineConfigurationException($"Pipeline '{name}' must declare at least one task.");
         }
 
-        var (pipelineType, argumentType, isConfigurable) = ResolvePipelineAndArgumentTypes(name, definition);
+        var (pipelineType, argumentType, _) = ResolvePipelineAndArgumentTypes(name, definition);
         var taskInterfaceType = typeof(IPipelineTask<>).MakeGenericType(argumentType);
 
         var taskTypes = new Type[taskEntries.Count];
@@ -145,11 +145,6 @@ public static class ConfigurationServiceCollectionExtensions
             // Every task in a config-registered pipeline participates in the binder so that
             // [Required] validation runs even when no `config` block is supplied.
             taskBinder.RegisterTask(name, i, entry.ConfigSection);
-        }
-
-        if (isConfigurable)
-        {
-            services.TryAddTransient(pipelineType);
         }
 
         var attributeForRegistry = new PipelineAttribute(name, argumentType, taskTypes);
