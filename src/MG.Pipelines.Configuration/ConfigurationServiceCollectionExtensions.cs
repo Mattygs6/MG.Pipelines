@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 
 using MG.Pipelines.Attribute;
@@ -8,6 +10,7 @@ using MG.Pipelines.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Primitives;
 
 namespace MG.Pipelines.Configuration;
 
@@ -19,9 +22,19 @@ public static class ConfigurationServiceCollectionExtensions
     /// definitions and registers each entry as a keyed pipeline. Task entries may be either a bare
     /// type-name string or an object of the form <c>{ "type": "...", "config": { ... } }</c>; the
     /// <c>config</c> sub-block is bound onto the resolved task instance via
-    /// <see cref="ConfigurationPipelineTaskBinder"/> at pipeline-construction time, and
+    /// <see cref="ConfigurationTaskValidator"/> at pipeline-construction time, and
     /// <see cref="System.ComponentModel.DataAnnotations"/> validation is enforced.
     /// </summary>
+    /// <remarks>
+    /// After initial registration this method subscribes to <paramref name="configurationSection"/>'s
+    /// reload token: when the underlying source notifies of a change (e.g. a JSON file backed with
+    /// <c>reloadOnChange: true</c>), each existing pipeline's task list is re-parsed and atomically
+    /// swapped into the <see cref="IPipelineTaskRegistry"/>. New pipeline names introduced by reload
+    /// are ignored — pipelines are fixed at startup; only their task lists are mutable.
+    ///
+    /// The registry is also exposed as <see cref="IPipelineTaskRegistry"/> so callers can add or
+    /// remove tasks programmatically at runtime via <see cref="IPipelineTaskRegistry.SetTasks"/>.
+    /// </remarks>
     /// <param name="services">The service collection.</param>
     /// <param name="configurationSection">A configuration section bound as a JSON array of pipeline definitions.</param>
     /// <exception cref="ArgumentNullException">An argument is <see langword="null"/>.</exception>
@@ -44,39 +57,199 @@ public static class ConfigurationServiceCollectionExtensions
         services.TryAddTransient<IPipelineFactory, ServiceProviderPipelineFactory>();
 
         var argsBinder = GetOrAddArgsBinder(services);
-        var taskBinder = GetOrAddTaskBinder(services);
+        var registry = GetOrAddRegistry(services);
 
         var seenNames = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entrySection in configurationSection.GetChildren())
         {
-            var definition = entrySection.Get<PipelineDefinition>();
-            if (definition is null)
-            {
-                throw new PipelineConfigurationException("Pipeline definition entry is null.");
-            }
+            var parsed = ParseDefinition(entrySection);
 
-            if (string.IsNullOrWhiteSpace(definition.Name))
-            {
-                throw new PipelineConfigurationException("Pipeline definition is missing 'name'.");
-            }
-
-            if (!seenNames.Add(definition.Name!))
+            if (!seenNames.Add(parsed.Name))
             {
                 throw new PipelineConfigurationException(
-                    $"Duplicate pipeline name '{definition.Name}' in configuration.");
+                    $"Duplicate pipeline name '{parsed.Name}' in configuration.");
             }
 
-            var taskEntries = ParseTaskEntries(entrySection.GetSection("tasks"), definition.Name!);
-            RegisterDefinition(services, definition.Name!, definition, taskEntries, taskBinder);
+            RegisterDefinition(services, registry, parsed);
 
-            var argsSection = entrySection.GetSection("args");
-            if (argsSection.Exists())
+            if (parsed.ArgsSection is not null)
             {
-                argsBinder.SetArgsConfiguration(definition.Name!, argsSection);
+                argsBinder.SetArgsConfiguration(parsed.Name, parsed.ArgsSection);
             }
         }
 
+        ChangeToken.OnChange(
+            () => configurationSection.GetReloadToken(),
+            () => Reload(configurationSection, registry, argsBinder));
+
         return services;
+    }
+
+    private static void RegisterDefinition(
+        IServiceCollection services,
+        PipelineTaskRegistry registry,
+        ParsedDefinition parsed)
+    {
+        var slotsBuilder = ImmutableArray.CreateBuilder<PipelineTaskSlot>(parsed.TaskEntries.Count);
+        var taskInterfaceType = typeof(IPipelineTask<>).MakeGenericType(parsed.ArgumentType);
+
+        for (var i = 0; i < parsed.TaskEntries.Count; i++)
+        {
+            var entry = parsed.TaskEntries[i];
+            var taskType = TypeNameResolver.Resolve(entry.TypeName, entry.ContextLabel);
+
+            if (!Attribute.Reflection.DescendsFromAncestorType(taskType, taskInterfaceType))
+            {
+                throw new PipelineConfigurationException(
+                    $"Task '{taskType.FullName}' in pipeline '{parsed.Name}' must implement '{taskInterfaceType.FullName}'.");
+            }
+
+            services.TryAddTransient(taskType);
+            slotsBuilder.Add(new PipelineTaskSlot(taskType, entry.ConfigSection));
+        }
+
+        var slots = slotsBuilder.MoveToImmutable();
+        registry.Initialize(parsed.Name, parsed.ArgumentType, slots);
+
+        var attributeForRegistry = new PipelineAttribute(
+            parsed.Name,
+            parsed.ArgumentType,
+            slots.Select(s => s.TaskType).ToArray());
+        Registration.Pipelines[parsed.Name] = new PipelineRegistration(parsed.PipelineType, attributeForRegistry);
+
+        var closedPipelineInterface = typeof(IPipeline<>).MakeGenericType(parsed.ArgumentType);
+        var pipelineType = parsed.PipelineType;
+
+        services.AddKeyedTransient(closedPipelineInterface, parsed.Name, (sp, key) =>
+            BuildPipeline(sp, (string)key!, pipelineType, taskInterfaceType, registry));
+    }
+
+    private static object BuildPipeline(
+        IServiceProvider sp,
+        string pipelineName,
+        Type pipelineType,
+        Type taskInterfaceType,
+        IPipelineTaskRegistry registry)
+    {
+        var slots = registry.GetTasks(pipelineName);
+        var taskListType = typeof(List<>).MakeGenericType(taskInterfaceType);
+        var taskList = (IList)Activator.CreateInstance(taskListType)!;
+
+        IPipelineTaskInstanceBinder[]? userBinders = null;
+
+        for (var i = 0; i < slots.Count; i++)
+        {
+            var slot = slots[i];
+            var taskInstance = ActivatorUtilities.GetServiceOrCreateInstance(sp, slot.TaskType);
+
+            ConfigurationTaskValidator.BindAndValidate(pipelineName, i, taskInstance, slot.ConfigSection);
+
+            if (userBinders is null)
+            {
+                var enumerable = sp.GetServices<IPipelineTaskInstanceBinder>();
+                userBinders = enumerable as IPipelineTaskInstanceBinder[]
+                              ?? enumerable.ToArray();
+            }
+
+            for (var b = 0; b < userBinders.Length; b++)
+            {
+                userBinders[b].Bind(pipelineName, i, taskInstance);
+            }
+
+            taskList.Add(taskInstance);
+        }
+
+        return ActivatorUtilities.CreateInstance(sp, pipelineType, taskList);
+    }
+
+    private static void Reload(
+        IConfiguration configurationSection,
+        PipelineTaskRegistry registry,
+        ConfigurationPipelineArgsBinder argsBinder)
+    {
+        foreach (var entrySection in configurationSection.GetChildren())
+        {
+            ParsedDefinition parsed;
+            try
+            {
+                parsed = ParseDefinition(entrySection);
+            }
+            catch (PipelineConfigurationException)
+            {
+                // Skip malformed entries on reload — leave existing registrations intact.
+                continue;
+            }
+
+            if (!registry.Contains(parsed.Name))
+            {
+                continue;
+            }
+
+            // Argument type is fixed at startup. If the reloaded definition disagrees, skip
+            // rather than half-applying.
+            if (registry.GetArgumentType(parsed.Name) != parsed.ArgumentType)
+            {
+                continue;
+            }
+
+            var taskInterfaceType = typeof(IPipelineTask<>).MakeGenericType(parsed.ArgumentType);
+            var newSlots = new List<PipelineTaskSlot>(parsed.TaskEntries.Count);
+
+            try
+            {
+                foreach (var entry in parsed.TaskEntries)
+                {
+                    var taskType = TypeNameResolver.Resolve(entry.TypeName, entry.ContextLabel);
+                    if (!Attribute.Reflection.DescendsFromAncestorType(taskType, taskInterfaceType))
+                    {
+                        throw new PipelineConfigurationException(
+                            $"Task '{taskType.FullName}' in pipeline '{parsed.Name}' must implement '{taskInterfaceType.FullName}'.");
+                    }
+
+                    newSlots.Add(new PipelineTaskSlot(taskType, entry.ConfigSection));
+                }
+
+                registry.SetTasks(parsed.Name, newSlots);
+            }
+            catch (PipelineConfigurationException)
+            {
+                // Reload failed validation for this pipeline — leave its current tasks intact.
+                continue;
+            }
+
+            if (parsed.ArgsSection is not null)
+            {
+                argsBinder.SetArgsConfiguration(parsed.Name, parsed.ArgsSection);
+            }
+        }
+    }
+
+    private static ParsedDefinition ParseDefinition(IConfigurationSection entrySection)
+    {
+        var definition = entrySection.Get<PipelineDefinition>()
+            ?? throw new PipelineConfigurationException("Pipeline definition entry is null.");
+
+        if (string.IsNullOrWhiteSpace(definition.Name))
+        {
+            throw new PipelineConfigurationException("Pipeline definition is missing 'name'.");
+        }
+
+        var (pipelineType, argumentType) = ResolvePipelineAndArgumentTypes(definition.Name!, definition);
+        var taskEntries = ParseTaskEntries(entrySection.GetSection("tasks"), definition.Name!);
+
+        if (taskEntries.Count == 0)
+        {
+            throw new PipelineConfigurationException(
+                $"Pipeline '{definition.Name}' must declare at least one task.");
+        }
+
+        var argsSection = entrySection.GetSection("args");
+        return new ParsedDefinition(
+            definition.Name!,
+            pipelineType,
+            argumentType,
+            taskEntries,
+            argsSection.Exists() ? argsSection : null);
     }
 
     private static List<TaskEntry> ParseTaskEntries(IConfigurationSection tasksSection, string pipelineName)
@@ -112,51 +285,7 @@ public static class ConfigurationServiceCollectionExtensions
         return entries;
     }
 
-    private static void RegisterDefinition(
-        IServiceCollection services,
-        string name,
-        PipelineDefinition definition,
-        List<TaskEntry> taskEntries,
-        ConfigurationPipelineTaskBinder taskBinder)
-    {
-        if (taskEntries.Count == 0)
-        {
-            throw new PipelineConfigurationException($"Pipeline '{name}' must declare at least one task.");
-        }
-
-        var (pipelineType, argumentType, _) = ResolvePipelineAndArgumentTypes(name, definition);
-        var taskInterfaceType = typeof(IPipelineTask<>).MakeGenericType(argumentType);
-
-        var taskTypes = new Type[taskEntries.Count];
-        for (var i = 0; i < taskEntries.Count; i++)
-        {
-            var entry = taskEntries[i];
-            var taskType = TypeNameResolver.Resolve(entry.TypeName, entry.ContextLabel);
-
-            if (!Attribute.Reflection.DescendsFromAncestorType(taskType, taskInterfaceType))
-            {
-                throw new PipelineConfigurationException(
-                    $"Task '{taskType.FullName}' in pipeline '{name}' must implement '{taskInterfaceType.FullName}'.");
-            }
-
-            taskTypes[i] = taskType;
-            services.TryAddTransient(taskType);
-
-            // Every task in a config-registered pipeline participates in the binder so that
-            // [Required] validation runs even when no `config` block is supplied.
-            taskBinder.RegisterTask(name, i, entry.ConfigSection);
-        }
-
-        var attributeForRegistry = new PipelineAttribute(name, argumentType, taskTypes);
-        Registration.Pipelines[name] = new PipelineRegistration(pipelineType, attributeForRegistry);
-
-        var closedPipelineInterface = typeof(IPipeline<>).MakeGenericType(argumentType);
-
-        services.AddKeyedTransient(closedPipelineInterface, name, (sp, key) =>
-            PipelineBuilder.Build(sp, (string)key!, pipelineType, taskInterfaceType, taskTypes));
-    }
-
-    private static (Type pipelineType, Type argumentType, bool isConfigurable) ResolvePipelineAndArgumentTypes(
+    private static (Type pipelineType, Type argumentType) ResolvePipelineAndArgumentTypes(
         string name,
         PipelineDefinition definition)
     {
@@ -173,7 +302,7 @@ public static class ConfigurationServiceCollectionExtensions
                     : TypeNameResolver.Resolve(definition.ArgumentType!,
                         $"argumentType of pipeline '{name}'"));
 
-            return (pipelineType, argumentType, isConfigurable: false);
+            return (pipelineType, argumentType);
         }
 
         if (string.IsNullOrWhiteSpace(definition.ArgumentType))
@@ -184,9 +313,7 @@ public static class ConfigurationServiceCollectionExtensions
 
         var argType = TypeNameResolver.Resolve(definition.ArgumentType!,
             $"argumentType of pipeline '{name}'");
-        var configurablePipelineType = typeof(ConfigurablePipeline<>).MakeGenericType(argType);
-
-        return (configurablePipelineType, argType, isConfigurable: true);
+        return (typeof(ConfigurablePipeline<>).MakeGenericType(argType), argType);
     }
 
     private static Type? ExtractArgumentTypeFromPipelineBase(Type pipelineType)
@@ -221,20 +348,20 @@ public static class ConfigurationServiceCollectionExtensions
         return binder;
     }
 
-    private static ConfigurationPipelineTaskBinder GetOrAddTaskBinder(IServiceCollection services)
+    private static PipelineTaskRegistry GetOrAddRegistry(IServiceCollection services)
     {
         var existing = services.FirstOrDefault(d =>
-            d.ServiceType == typeof(ConfigurationPipelineTaskBinder)
-            && d.ImplementationInstance is ConfigurationPipelineTaskBinder);
-        if (existing?.ImplementationInstance is ConfigurationPipelineTaskBinder current)
+            d.ServiceType == typeof(PipelineTaskRegistry)
+            && d.ImplementationInstance is PipelineTaskRegistry);
+        if (existing?.ImplementationInstance is PipelineTaskRegistry current)
         {
             return current;
         }
 
-        var binder = new ConfigurationPipelineTaskBinder();
-        services.AddSingleton(binder);
-        services.AddSingleton<IPipelineTaskInstanceBinder>(binder);
-        return binder;
+        var registry = new PipelineTaskRegistry();
+        services.AddSingleton(registry);
+        services.AddSingleton<IPipelineTaskRegistry>(registry);
+        return registry;
     }
 
     private readonly struct TaskEntry
@@ -248,6 +375,29 @@ public static class ConfigurationServiceCollectionExtensions
             TypeName = typeName;
             ConfigSection = configSection;
             ContextLabel = contextLabel;
+        }
+    }
+
+    private sealed class ParsedDefinition
+    {
+        public string Name { get; }
+        public Type PipelineType { get; }
+        public Type ArgumentType { get; }
+        public IReadOnlyList<TaskEntry> TaskEntries { get; }
+        public IConfiguration? ArgsSection { get; }
+
+        public ParsedDefinition(
+            string name,
+            Type pipelineType,
+            Type argumentType,
+            IReadOnlyList<TaskEntry> taskEntries,
+            IConfiguration? argsSection)
+        {
+            Name = name;
+            PipelineType = pipelineType;
+            ArgumentType = argumentType;
+            TaskEntries = taskEntries;
+            ArgsSection = argsSection;
         }
     }
 }

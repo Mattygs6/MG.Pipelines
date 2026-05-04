@@ -96,6 +96,37 @@ services.AddPipelinesFromConfiguration(builder.Configuration.GetSection("Pipelin
 
 If `pipelineType` is omitted, a built-in `ConfigurablePipeline<T>` is used (logs unhandled task exceptions through `ILogger<>`).
 
+## Live task mutation
+
+Configuration-registered pipelines support adding, removing, or reordering tasks at runtime — no app restart, no `BuildServiceProvider` rebuild. Pipeline names and argument types are fixed at startup; only the per-pipeline task list is mutable.
+
+**Programmatic API** — resolve `IPipelineTaskRegistry` and call `SetTasks`:
+
+```csharp
+var registry = provider.GetRequiredService<IPipelineTaskRegistry>();
+registry.SetTasks("checkout", new[]
+{
+    new PipelineTaskSlot(typeof(ValidateCart)),
+    new PipelineTaskSlot(typeof(FraudCheck)),
+    new PipelineTaskSlot(typeof(ChargeCard)),
+});
+```
+
+The next `factory.Create<T>("checkout")` returns a pipeline built from the new list. The swap is atomic — an in-flight build always sees a consistent snapshot.
+
+**Reload from `IConfiguration`** — `AddPipelinesFromConfiguration` automatically subscribes to the section's reload token, so any source registered with `reloadOnChange: true` (e.g. JSON files) updates the registry on file change. The standard environment-overlay pattern lives in your consumer:
+
+```csharp
+var pipelineConfig = new ConfigurationBuilder()
+    .AddJsonFile("pipelines.json", optional: false, reloadOnChange: true)
+    .AddJsonFile($"pipelines.{env.EnvironmentName}.json", optional: true, reloadOnChange: true)
+    .Build();
+
+services.AddPipelinesFromConfiguration(pipelineConfig.GetSection("Pipelines"));
+```
+
+See [docs/examples.md](docs/examples.md) for details (validation behaviour on reload failures, runtime-only task types, etc.).
+
 ## Pipeline semantics
 
 Tasks run in registration order. A task returns a `Task<PipelineResult>`:
@@ -131,8 +162,8 @@ dotnet test -c Release
 ## Releases
 
 - CI runs on every push and PR (build + test on Ubuntu and Windows).
-- Pushes to `dev` publish preview packages (`3.0.0-preview.<run-number>`) to NuGet.org.
-- Tagging `v3.0.0` on `master` publishes stable `3.0.0` packages.
+- Pushes to `dev` publish preview packages (`4.0.0-preview.<run-number>`) to NuGet.org.
+- Tagging `v4.0.0` on `master` publishes stable `4.0.0` packages.
 
 ## License
 

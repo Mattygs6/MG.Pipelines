@@ -435,7 +435,7 @@ public class TaskConfigurationTests
     }
 
     [Fact]
-    public void Task_Binder_Is_Reachable_As_IPipelineTaskInstanceBinder()
+    public void Task_Registry_Is_Reachable_And_Reflects_Initial_Registration()
     {
         var section = ConfigBuilders.BuildSection($$"""
             {
@@ -457,8 +457,15 @@ public class TaskConfigurationTests
         services.AddPipelinesFromConfiguration(section);
 
         using var provider = services.BuildServiceProvider();
-        var binders = provider.GetServices<IPipelineTaskInstanceBinder>();
-        binders.Should().ContainSingle()
-            .Which.Should().BeOfType<ConfigurationPipelineTaskBinder>();
+        var registry = provider.GetRequiredService<IPipelineTaskRegistry>();
+
+        registry.Contains("checkout").Should().BeTrue();
+        registry.GetArgumentType("checkout").Should().Be(typeof(ConfigurableArgs));
+        registry.GetTasks("checkout").Should().ContainSingle()
+            .Which.TaskType.Should().Be(typeof(HttpCallTask));
+
+        // No internal IPipelineTaskInstanceBinder is auto-registered any more — config binding
+        // happens inline in the keyed pipeline factory. Users may still register their own.
+        provider.GetServices<IPipelineTaskInstanceBinder>().Should().BeEmpty();
     }
 }

@@ -422,9 +422,9 @@ declared in the bare-string form. Tasks registered exclusively through
 > semantic, drop the `required` keyword and validate manually, or use
 > `[Required]` on a nullable type.
 
-**Per-instance, not per-type** — config is keyed by `(pipeline name, task
-index)`, so the same task type can appear in multiple pipelines with different
-config, and even multiple times within one pipeline:
+**Per-instance, not per-type** — config is attached to each ordered task slot,
+so the same task type can appear in multiple pipelines with different config,
+and even multiple times within one pipeline:
 
 ```jsonc
 {
@@ -444,14 +444,92 @@ default registration lifetime). Pre-registering a task as `AddSingleton` would
 let successive `factory.Create<T>(name)` calls overwrite each other's config on
 the shared instance.
 
-**Custom binders** — the contract is `IPipelineTaskInstanceBinder` (in
-`MG.Pipelines.DependencyInjection`). The Configuration package registers an
-implementation; you can register additional binders for other sources (e.g.
-secrets), and they all run in registration order against each task instance.
+**Custom binders** — config-block binding and `[Required]`/`required`
+validation run inline in the pipeline build path; the framework no longer
+registers an internal `IPipelineTaskInstanceBinder`. If you need cross-cutting
+per-instance customisation from another source (e.g. secrets, feature flags),
+register your own `IPipelineTaskInstanceBinder` (the contract lives in
+`MG.Pipelines.DependencyInjection`). Multiple registrations all run in
+registration order against each task instance, after the config block has been
+applied.
 
 ---
 
-## 7. Attribute + Configuration (override pattern)
+## 7. Live task mutation and reload-on-change
+
+Pipeline names and argument types are fixed at
+`AddPipelinesFromConfiguration` time, but the per-pipeline task list is
+mutable at runtime. Two ways in:
+
+**Programmatic mutation** — resolve `IPipelineTaskRegistry` and replace the
+task list wholesale. The swap is atomic, so an in-flight `Create<T>(name)`
+either sees the old list or the new one — never a half-applied state.
+
+```csharp
+public class FraudToggleService
+{
+    private readonly IPipelineTaskRegistry registry;
+    public FraudToggleService(IPipelineTaskRegistry registry) { this.registry = registry; }
+
+    public void EnableFraudCheck() =>
+        registry.SetTasks("checkout", new[]
+        {
+            new PipelineTaskSlot(typeof(ValidateCart)),
+            new PipelineTaskSlot(typeof(FraudCheck)),
+            new PipelineTaskSlot(typeof(ChargeCard)),
+            new PipelineTaskSlot(typeof(SendReceipt)),
+        });
+
+    public void DisableFraudCheck() =>
+        registry.SetTasks("checkout", new[]
+        {
+            new PipelineTaskSlot(typeof(ValidateCart)),
+            new PipelineTaskSlot(typeof(ChargeCard)),
+            new PipelineTaskSlot(typeof(SendReceipt)),
+        });
+}
+```
+
+`PipelineTaskSlot` optionally carries an `IConfiguration` for that task — the
+same config block you'd nest under `tasks[].config` in JSON. Tasks added at
+runtime do not need to be pre-registered in DI; they're activated via
+`ActivatorUtilities.GetServiceOrCreateInstance`, so DI-resolved dependencies
+still flow into the task constructor when available.
+
+`SetTasks` validates each task type implements `IPipelineTask<T>` for the
+pipeline's argument type before swapping. A bad list throws
+`PipelineConfigurationException` and the existing list is left intact.
+
+**Reload from `IConfiguration`** —
+`AddPipelinesFromConfiguration` automatically subscribes to the supplied
+section's reload token via `ChangeToken.OnChange(...)`. When the underlying
+source signals a change (e.g. a JSON file registered with
+`reloadOnChange: true`), each pipeline's task list is re-parsed and atomically
+swapped. New names introduced by reload are ignored, and any pipeline whose
+reloaded definition fails validation keeps its existing list.
+
+```csharp
+var pipelineConfig = new ConfigurationBuilder()
+    .AddJsonFile("pipelines.json", optional: false, reloadOnChange: true)
+    .AddJsonFile($"pipelines.{env.EnvironmentName}.json", optional: true, reloadOnChange: true)
+    .Build();
+
+services.AddPipelinesFromConfiguration(pipelineConfig.GetSection("Pipelines"));
+```
+
+Edits to either JSON file flow into the registry without restarting the host —
+useful for ops-driven task ordering changes (toggling a fraud check, swapping a
+gateway adapter, adding a metric-emitting wrapper) without redeploys.
+
+> **Scalar values inside an existing slot** — these already hot-reload without
+> any registry mutation: `IConfigurationSection` references are live, so a
+> change to e.g. `tasks[1].config.TimeoutSeconds` flows into the next task
+> instance the binder produces. The reload subscription kicks in only when the
+> *shape* of the task list changes (added, removed, reordered, or retyped).
+
+---
+
+## 8. Attribute + Configuration (override pattern)
 
 Register pipelines from attributes for the default behaviour, then layer
 configuration on top to override task lists at deploy time.
@@ -496,7 +574,7 @@ check toggle via config:
 
 ---
 
-## 8. Custom name resolution
+## 9. Custom name resolution
 
 Implement `IPipelineNameResolver` to expand a logical name into multiple
 candidates (most-specific first). The factory tries each in order and returns
@@ -540,7 +618,7 @@ resolves `AcmeCheckoutPipeline`; everyone else falls through to
 
 ---
 
-## 9. Rollback (undoable tasks)
+## 10. Rollback (undoable tasks)
 
 Tasks that implement `IUndoablePipelineTask<T>` are rolled back in reverse
 order when a later task aborts, fails, or throws. Non-undoable tasks in the
@@ -566,7 +644,7 @@ abort on the first undo failure rather than continuing).
 
 ---
 
-## 10. Cancellation
+## 11. Cancellation
 
 `ExecuteAsync` accepts a `CancellationToken`. When cancelled, the pipeline
 stops at the next task boundary, runs rollback over the executed tasks, and
@@ -609,7 +687,7 @@ and rolls back.
 
 ---
 
-## 11. Result semantics
+## 12. Result semantics
 
 ```csharp
 public Task<PipelineResult> ExecuteAsync(CheckoutArgs args, CancellationToken ct = default)
@@ -627,7 +705,7 @@ rollback.
 
 ---
 
-## 12. Putting it together (ASP.NET Core)
+## 13. Putting it together (ASP.NET Core)
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
